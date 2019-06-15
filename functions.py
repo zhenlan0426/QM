@@ -9,6 +9,32 @@ import torch
 import torch.nn.functional as F
 from torch.nn import Sequential, Linear, ReLU, GRU
 from torch_geometric.nn import NNConv
+import numpy as np
+
+def Rx():
+    theta = torch.rand(1)*np.pi*2
+    return torch.tensor([[1,0,0],\
+                         [0,torch.cos(theta),-torch.sin(theta)],\
+                         [0,torch.sin(theta),torch.cos(theta)]])
+def Ry():
+    theta = torch.rand(1)*np.pi*2
+    return torch.tensor([[torch.cos(theta),0,torch.sin(theta)],\
+                         [0,1,0],\
+                         [-torch.sin(theta),0,torch.cos(theta)]])
+def Rz():
+    theta = torch.rand(1)*np.pi*2
+    return torch.tensor([[torch.cos(theta),-torch.sin(theta),0],\
+                         [torch.sin(theta),torch.cos(theta),0],\
+                         [0,0,1]])
+def R():
+    # rotation transform
+    return torch.matmul(torch.matmul(Rz(),Ry()),Rx())
+
+def transform_xyz(node):
+    x = node['x']
+    x[:,:3] = torch.matmul(R(),x[:,:3].t()).t()
+    return node
+
 
 class Net(torch.nn.Module):
     def __init__(self,dim=64,edge_dim=12):
