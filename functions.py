@@ -115,13 +115,13 @@ class Net_int(torch.nn.Module):
         
 class Net_int_2Edges(torch.nn.Module):
     # use both types of edges
-    def __init__(self,dim=64,edge_dim=12):
-        super(Net_int, self).__init__()
-        self.lin_node = torch.nn.Linear(8, dim)
-        self.lin_edge_attr = torch.nn.Linear(19, edge_dim)
+    def __init__(self,dim=64,edge_dim=12,node_in=8,edge_in=19,edge_in3=8):
+        super(Net_int_2Edges, self).__init__()
+        self.lin_node = torch.nn.Linear(node_in, dim)
+        self.lin_edge_attr = torch.nn.Linear(edge_in, edge_dim)
         
         nn1 = Linear(edge_dim, dim * dim, bias=False)
-        nn2 = Linear(8, dim * dim * 2 * 2, bias=False)
+        nn2 = Linear(edge_in3, dim * dim * 2 * 2, bias=False)
         
         self.conv1 = NNConv(dim, dim, nn1, aggr='mean', root_weight=False)
         self.gru1 = GRU(dim, dim)
@@ -131,12 +131,13 @@ class Net_int_2Edges(torch.nn.Module):
         self.conv2 = NNConv(dim*2, dim*2, nn2, aggr='mean', root_weight=False)
         self.gru2 = GRU(dim*2, dim*2)
         
-        self.lin_weight = Linear(8, dim*3, bias=False)
+        self.lin_weight = Linear(8, dim*3*2, bias=False)
         self.lin_bias = Linear(8, 1, bias=False)
-        self.norm = BatchNorm1d(dim*3)
+        self.norm = BatchNorm1d(dim*3*2)
+        self.norm_x = BatchNorm1d(node_in)
         
     def forward(self, data,IsTrain=False):
-        out = F.rrelu(self.lin_node(data.x))
+        out = F.rrelu(self.lin_node(self.norm_x(data.x)))
         edge_attr = F.rrelu(self.lin_edge_attr(data.edge_attr))
         h = out.unsqueeze(0)
         # edge_*3 only does not repeat for undirected graph. Hence need to add (j,i) to (i,j) in edges
@@ -150,6 +151,7 @@ class Net_int_2Edges(torch.nn.Module):
             out = out.squeeze(0)
         
         out = self.lin_covert(out)
+        h = out.unsqueeze(0)
         for i in range(2):
             # using couping as edge
             m = F.rrelu(self.conv2(out, edge_index3, edge_attr3))
@@ -171,7 +173,7 @@ class Net_int_2Edges(torch.nn.Module):
             loss = torch.sum(torch.log(torch.sum(abs_ * data.edge_attr3[:,nonzeroIndex],0)/k[nonzeroIndex]))/nonzeroIndex.shape[0]
             return loss
         else:
-            return yhat           
+            return yhat       
         
         
         
