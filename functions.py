@@ -8,7 +8,7 @@ Created on Sun Jun  9 13:57:40 2019
 import torch
 import torch.nn.functional as F
 from torch.nn import Sequential, Linear, ReLU, GRU,BatchNorm1d,Dropout,RReLU
-from torch_geometric.nn import NNConv
+from torch_geometric.nn import NNConv,GATConv
 import numpy as np
 
 def Rx():
@@ -177,11 +177,132 @@ class Net_int_2Edges(torch.nn.Module):
         
         
         
+class Net_int_2Edges_attention(torch.nn.Module):
+    # use both types of edges
+    def __init__(self,dim=64,edge_dim=12,node_in=8,edge_in=19,edge_in3=8):
+        super(Net_int_2Edges_attention, self).__init__()
+        self.lin_node = torch.nn.Linear(node_in, dim)
+        
+        self.conv1 = GATConv(dim, dim, negative_slope=0.2, dropout=0.1, bias=True)
+        self.gru1 = GRU(dim, dim)
+        self.lin_covert = Sequential(BatchNorm1d(dim),Linear(dim, dim*2), \
+                                     RReLU(), Dropout(),Linear(dim*2, dim*2),RReLU())
+        
+        self.conv2 = GATConv(dim*2, dim*2, negative_slope=0.2, dropout=0.1, bias=True)
+        self.gru2 = GRU(dim*2, dim*2)
+        
+        self.lin_weight = Linear(8, dim*3*2, bias=False)
+        self.lin_bias = Linear(8, 1, bias=False)
+        self.norm = BatchNorm1d(dim*3*2)
+        self.norm_x = BatchNorm1d(node_in)
+        
+    def forward(self, data,IsTrain=False):
+        out = F.rrelu(self.lin_node(self.norm_x(data.x)))
+        h = out.unsqueeze(0)
+        # edge_*3 only does not repeat for undirected graph. Hence need to add (j,i) to (i,j) in edges
+        edge_index3 = torch.cat([data.edge_index3,data.edge_index3[[1,0]]],1)
+        
+        for i in range(2):
+            # using bonding as edge
+            m = F.rrelu(self.conv1(out, data.edge_index))
+            out, h = self.gru1(m.unsqueeze(0), h)
+            out = out.squeeze(0)
+        
+        out = self.lin_covert(out)
+        h = out.unsqueeze(0)
+        for i in range(2):
+            # using couping as edge
+            m = F.rrelu(self.conv2(out, edge_index3))
+            out, h = self.gru2(m.unsqueeze(0), h)
+            out = out.squeeze(0)     
+            
+        temp = out[data.edge_index3] # (2,N,d)
+        yhat = torch.cat([temp.mean(0),temp[0]*temp[1],(temp[0]-temp[1])**2],1)
+        yhat = self.norm(yhat)
+        weight = self.lin_weight(data.edge_attr3)
+        bias = self.lin_bias(data.edge_attr3)
+        yhat = torch.sum(yhat * weight,1,keepdim=True) + bias
+        yhat = yhat.squeeze(1)
+        
+        if IsTrain:
+            k = torch.sum(data.edge_attr3,0)
+            nonzeroIndex = torch.nonzero(k).squeeze(1)
+            abs_ = torch.abs(data.y-yhat).unsqueeze(1)
+            loss = torch.sum(torch.log(torch.sum(abs_ * data.edge_attr3[:,nonzeroIndex],0)/k[nonzeroIndex]))/nonzeroIndex.shape[0]
+            return loss
+        else:
+            return yhat            
         
         
         
+class Net_int_2Edges_attention2(torch.nn.Module):
+    # use both types of edges
+    def __init__(self,dim=64,edge_dim=12,node_in=8,edge_in=19,edge_in3=8):
+        super(Net_int_2Edges_attention2, self).__init__()
+        self.lin_node = torch.nn.Linear(node_in, dim)
         
+        self.conv1 = GATConv(dim, dim, negative_slope=0.2, bias=True)
         
+        self.lin_covert1 = Sequential(BatchNorm1d(dim),Linear(dim, dim*2), \
+                                     RReLU(), Dropout(),Linear(dim, dim),RReLU())     
+        
+        self.conv2 = GATConv(dim, dim, negative_slope=0.2, bias=True)
+        
+        self.lin_covert2 = Sequential(BatchNorm1d(dim),Linear(dim, dim*2), \
+                                     RReLU(), Dropout(),Linear(dim, dim),RReLU())     
+        
+        self.conv3 = GATConv(dim, dim, negative_slope=0.2, bias=True)
+        
+        self.lin_covert3 = Sequential(BatchNorm1d(dim),Linear(dim, dim*2), \
+                             RReLU(), Dropout(),Linear(dim*2, dim),RReLU())
+        
+        self.conv4 = GATConv(dim, dim, negative_slope=0.2, bias=True)
+        
+        self.lin_covert4 = Sequential(BatchNorm1d(dim),Linear(dim, dim*2), \
+                             RReLU(), Dropout(),Linear(dim*2, dim),RReLU())
+        
+        self.lin_weight = Linear(8, dim*3, bias=False)
+        self.lin_bias = Linear(8, 1, bias=False)
+        self.norm = BatchNorm1d(dim*3)
+        self.norm_x = BatchNorm1d(node_in)
+        
+    def forward(self, data,IsTrain=False):
+        out = F.rrelu(self.lin_node(self.norm_x(data.x)))
+        # edge_*3 only does not repeat for undirected graph. Hence need to add (j,i) to (i,j) in edges
+        edge_index3 = torch.cat([data.edge_index3,data.edge_index3[[1,0]]],1)
+        
+        m = F.rrelu(self.conv1(out, data.edge_index))
+        out = out + m
+        out = self.lin_covert1(out)
+        
+        m = F.rrelu(self.conv2(out, data.edge_index))
+        out = out + m
+        out = self.lin_covert2(out)        
+        
+        m = F.rrelu(self.conv3(out, edge_index3))
+        out = out + m
+        out = self.lin_covert3(out)          
+
+        m = F.rrelu(self.conv4(out, edge_index3))
+        out = out + m
+        out = self.lin_covert4(out)
+            
+        temp = out[data.edge_index3] # (2,N,d)
+        yhat = torch.cat([temp.mean(0),temp[0]*temp[1],(temp[0]-temp[1])**2],1)
+        yhat = self.norm(yhat)
+        weight = self.lin_weight(data.edge_attr3)
+        bias = self.lin_bias(data.edge_attr3)
+        yhat = torch.sum(yhat * weight,1,keepdim=True) + bias
+        yhat = yhat.squeeze(1)
+        
+        if IsTrain:
+            k = torch.sum(data.edge_attr3,0)
+            nonzeroIndex = torch.nonzero(k).squeeze(1)
+            abs_ = torch.abs(data.y-yhat).unsqueeze(1)
+            loss = torch.sum(torch.log(torch.sum(abs_ * data.edge_attr3[:,nonzeroIndex],0)/k[nonzeroIndex]))/nonzeroIndex.shape[0]
+            return loss
+        else:
+            return yhat                    
         
         
         
