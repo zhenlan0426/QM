@@ -11,6 +11,16 @@ from torch.nn import Sequential, Linear, ReLU, GRU,BatchNorm1d,Dropout,RReLU
 from torch_geometric.nn import NNConv,GATConv
 import numpy as np
 
+'''
+data.batch[data.edge_index3[:,0]] - data.batch[data.edge_index3[:,1]] # this should all be zero
+coupling_batch_index = data.batch[data.edge_index3[:,0]]
+
+pool = self.set2set(out, data.batch) # (m,d)
+pool = torch.index_select(pool,dim=0,index=coupling_batch_index) # (n_target,d)
+yhat = torch.cat([temp.mean(0),temp[0]*temp[1],(temp[0]-temp[1])**2,pool],1)
+# change dim*3*2 in self.lin_weight = Linear(8, dim*3*2, bias=False)
+'''
+
 def Rx():
     theta = torch.rand(1)*np.pi*2
     return torch.tensor([[1,0,0],\
