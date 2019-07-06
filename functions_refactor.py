@@ -402,7 +402,7 @@ def save_model(model,opt,reuse,block,head,data,batch_size,dim,clip,layer1,layer2
                                           layer1,layer2,factor,epochs,postStr]])))
 
 
-def make_submission(reuse,block,head,data,batch_size,dim,clip,layer1,layer2,factor,epochs):
+def make_submission(reuse,block,head,data,batch_size,dim,clip,layer1,layer2,factor,epochs,postStr=''):
     # set up
     model = GNN(reuse,block,head,dim,layer1,layer2,factor,**data_dict[data]).to('cuda:0')
     submission = pd.read_csv('../Data/sample_submission.csv')
@@ -420,7 +420,7 @@ def make_submission(reuse,block,head,data,batch_size,dim,clip,layer1,layer2,fact
         # load model
         checkpoint = torch.load('../Model/{}.tar'.format('_'.join([str(i).split('}')[1] if '}' in str(i) else str(i) \
                                             for i in [reuse,block,head,data,batch_size,dim,clip,\
-                                                  layer1,layer2,factor,epochs,'type_'+str(i)]])))
+                                                  layer1,layer2,factor,epochs,'type_'+str(i)+postStr]])))
         model.load_state_dict(checkpoint['model_state_dict'])
     
     
@@ -440,7 +440,7 @@ def make_submission(reuse,block,head,data,batch_size,dim,clip,layer1,layer2,fact
     # save types results    
     submission.to_csv('../Submission/{}.csv'.format('_'.join([str(i).split('}')[1] if '}' in str(i) else str(i) \
                                         for i in [reuse,block,head,data,batch_size,dim,clip,\
-                                              layer1,layer2,factor,epochs,'all_types']])),\
+                                              layer1,layer2,factor,epochs,'all_types'+postStr]])),\
                       index=False)
     
     # save final results for submission
@@ -450,5 +450,5 @@ def make_submission(reuse,block,head,data,batch_size,dim,clip,layer1,layer2,fact
     
     submission.to_csv('../Submission/{}.csv'.format('_'.join([str(i).split('}')[1] if '}' in str(i) else str(i) \
                                         for i in [reuse,block,head,data,batch_size,dim,clip,\
-                                              layer1,layer2,factor,epochs,'final']])),\
+                                              layer1,layer2,factor,epochs,'final'+postStr]])),\
                       index=False)
