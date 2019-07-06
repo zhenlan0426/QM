@@ -24,7 +24,7 @@ import time
 import pickle
 import numpy as np
 import pandas as pd
-
+import copy
 
 '''------------------------------------------------------------------------------------------------------------------'''
 '''------------------------------------------------------ Data ------------------------------------------------------'''
@@ -137,19 +137,34 @@ class cat3Head(torch.nn.Module):
         super(cat3Head, self).__init__()
         self.lin_weight = Linear(edge_in3, dim*cat_factor, bias=False)
         self.lin_bias = Linear(edge_in3, 1, bias=False)
-        self.norm = BatchNorm1d(dim*cat_factor)
+        #self.norm = BatchNorm1d(dim*cat_factor)
         
     def forward(self,x,edge_index3,edge_attr3,edge_attr4):
         temp = x[edge_index3] # (2,N,d)
         yhat = torch.cat([temp.mean(0),temp[0]*temp[1],(temp[0]-temp[1])**2],1)
-        yhat = self.norm(yhat)
+        #yhat = self.norm(yhat)
         weight = self.lin_weight(edge_attr3)
         bias = self.lin_bias(edge_attr3)
         yhat = torch.sum(yhat * weight,1,keepdim=True) + bias
         yhat = yhat.squeeze(1)
         return yhat
 
-
+class cat3Head_type(torch.nn.Module):
+    def __init__(self,dim,edge_in3,edge_in4):
+        cat_factor = 3
+        super(cat3Head_type, self).__init__()
+        self.linear = Sequential(#BatchNorm1d(dim*cat_factor),
+                                 Linear(dim*cat_factor,dim*cat_factor*2),
+                                 ReLU(inplace=True),
+                                 #BatchNorm1d(dim*cat_factor*2),
+                                 Linear(dim*cat_factor*2,1))
+        
+    def forward(self,x,edge_index3,edge_attr3,edge_attr4):
+        temp = x[edge_index3] # (2,N,d)
+        yhat = torch.cat([temp.mean(0),temp[0]*temp[1],(temp[0]-temp[1])**2],1)
+        yhat = self.linear(yhat).squeeze(1)
+        return yhat
+    
 '''------------------------------------------------------------------------------------------------------------------'''
 '''------------------------------------------------------ Conv ------------------------------------------------------'''
 '''------------------------------------------------------------------------------------------------------------------'''
@@ -252,7 +267,7 @@ class GNN(torch.nn.Module):
         
         self.head = head(dim,edge_in3,edge_in4)
         
-    def forward(self, data,IsTrain=False):
+    def forward(self, data,IsTrain=False,typeTrain=False):
         out = self.lin_node(data.x)
         # edge_*3 only does not repeat for undirected graph. Hence need to add (j,i) to (i,j) in edges
         edge_index3 = torch.cat([data.edge_index3,data.edge_index3[[1,0]]],1)
@@ -264,15 +279,28 @@ class GNN(torch.nn.Module):
 
         for conv in self.conv2:
             out = conv(out,edge_index3,edge_attr3)    
-    
-        yhat = self.head(out,data.edge_index3,data.edge_attr3,data.edge_attr4)
+        
+        if typeTrain:
+            if IsTrain:
+                y = data.y[data.type_attr]
+            edge_index3 = data.edge_index3[:,data.type_attr]
+            edge_attr3 = data.edge_attr3[data.type_attr]
+            edge_attr4 = data.edge_attr4[data.type_attr]
+        else:
+            if IsTrain:
+                y = data.y
+            edge_index3 = data.edge_index3
+            edge_attr3 = data.edge_attr3
+            edge_attr4 = data.edge_attr4
+            
+        yhat = self.head(out,edge_index3,edge_attr3,edge_attr4)
         
         if IsTrain:
-            k = torch.sum(data.edge_attr3,0)
+            k = torch.sum(edge_attr3,0)
             nonzeroIndex = torch.nonzero(k).squeeze(1)
-            abs_ = torch.abs(data.y-yhat).unsqueeze(1)
+            abs_ = torch.abs(y-yhat).unsqueeze(1)
             loss_perType = torch.zeros(8,device='cuda:0')
-            loss_perType[nonzeroIndex] = torch.log(torch.sum(abs_ * data.edge_attr3[:,nonzeroIndex],0)/k[nonzeroIndex])
+            loss_perType[nonzeroIndex] = torch.log(torch.sum(abs_ * edge_attr3[:,nonzeroIndex],0)/k[nonzeroIndex])
             loss = torch.sum(loss_perType)/nonzeroIndex.shape[0]
             return loss,loss_perType
         else:
@@ -284,21 +312,25 @@ def get_data(data,batch_size):
         train_data = pickle.load(handle)
     with open(data.format('val'), 'rb') as handle:
         val_data = pickle.load(handle)
-    with open(data.format('test'), 'rb') as handle:
-        test_data = pickle.load(handle)
     
     train_list = [Data(**d) for d in train_data]
     train_dl = DataLoader(train_list,batch_size,shuffle=True)
     val_list = [Data(**d) for d in val_data]
     val_dl = DataLoader(val_list,batch_size,shuffle=False)
-    test_list = [Data(**d) for d in test_data]
-    test_dl = DataLoader(test_list,batch_size,shuffle=False)
     
-    return train_dl,val_dl,test_dl
+    return train_dl,val_dl
 
-def train(opt,model,epochs,train_dl,val_dl,paras,clip):
+
+def train(opt,model,epochs,train_dl,val_dl,paras,clip,typeTrain=False,train_loss_list=None,val_loss_list=None):
     since = time.time()
-    train_loss_list,val_loss_list = [],[]
+    
+    lossBest = 1e6
+    if train_loss_list is None:
+        train_loss_list,val_loss_list = [],[]
+        epoch0 = 0
+    else:
+        epoch0 = len(train_loss_list)
+        
     opt.zero_grad()
     for epoch in range(epochs):
         # training #
@@ -311,7 +343,7 @@ def train(opt,model,epochs,train_dl,val_dl,paras,clip):
         
         for i,data in enumerate(train_dl):
             data = data.to('cuda:0')
-            loss,loss_perType = model(data,True)
+            loss,loss_perType = model(data,True,typeTrain)
             loss.backward()
             clip_grad_value_(paras,clip)
             opt.step()
@@ -324,10 +356,16 @@ def train(opt,model,epochs,train_dl,val_dl,paras,clip):
         with torch.no_grad():
             for j,data in enumerate(val_dl):
                 data = data.to('cuda:0')
-                loss,loss_perType = model(data,True)
+                loss,loss_perType = model(data,True,typeTrain)
                 val_loss += loss.item()
                 val_loss_perType += loss_perType.cpu().detach().numpy()
-        print('epoch:{}, train_loss: {:+.3f}, val_loss: {:+.3f}, \ntrain_vector: {}, \nval_vector  : {}\n'.format(epoch,train_loss/i,val_loss/j,\
+        
+        # save model
+        if loss.item()<lossBest:
+            lossBest = loss.item()
+            torch.save({'model_state_dict': model.state_dict()},'../Model/tmp.tar')
+            
+        print('epoch:{}, train_loss: {:+.3f}, val_loss: {:+.3f}, \ntrain_vector: {}, \nval_vector  : {}\n'.format(epoch+epoch0,train_loss/i,val_loss/j,\
                                                             '|'.join(['%+.2f'%i for i in train_loss_perType/i]),\
                                                             '|'.join(['%+.2f'%i for i in val_loss_perType/j])))
         train_loss_list.append(train_loss_perType/i)
@@ -335,10 +373,15 @@ def train(opt,model,epochs,train_dl,val_dl,paras,clip):
         
     time_elapsed = time.time() - since
     print('Training completed in {}s'.format(time_elapsed))
+    
+    # load best model
+    checkpoint = torch.load('../Model/tmp.tar')
+    model.load_state_dict(checkpoint['model_state_dict'])
     return model,train_loss_list,val_loss_list
     
     
-def save_results(train_loss_perType,val_loss_perType,reuse,block,head,data,batch_size,dim,clip,layer1,layer2,factor,epochs):
+def save_results(train_loss_perType,val_loss_perType,reuse,block,head,data,batch_size,dim,clip,layer1,layer2,factor,epochs,postStr='base'):
+    epochs = len(train_loss_perType)
     results = pd.DataFrame([[reuse,block,head,data,batch_size,dim,clip,layer1,layer2,factor] \
                         for _ in range(epochs)],columns=columns,dtype=str)
     temp = pd.DataFrame(np.concatenate([np.arange(epochs,dtype=np.int)[:,np.newaxis],np.stack(train_loss_perType,0),np.stack(val_loss_perType,0)],1),
@@ -347,13 +390,65 @@ def save_results(train_loss_perType,val_loss_perType,reuse,block,head,data,batch
     results.to_csv('../Data/results_{}.csv'.\
                format('_'.join([str(i).split('}')[1] if '}' in str(i) else str(i) \
                                 for i in [reuse,block,head,data,batch_size,dim,clip,\
-                                          layer1,layer2,factor,epochs,round(time.time(),0)]])),\
+                                          layer1,layer2,factor,epochs,postStr]])),\
               index=False)    
     
-def save_model(model,opt,reuse,block,head,data,batch_size,dim,clip,layer1,layer2,factor,epochs):
+def save_model(model,opt,reuse,block,head,data,batch_size,dim,clip,layer1,layer2,factor,epochs,postStr='base'):
     torch.save({'model_state_dict': model.state_dict(),
             'optimizer_state_dict': opt.state_dict(),
             'epochs':epochs
             }, '../Model/{}.tar'.format('_'.join([str(i).split('}')[1] if '}' in str(i) else str(i) \
                                     for i in [reuse,block,head,data,batch_size,dim,clip,\
-                                          layer1,layer2,factor,epochs,round(time.time(),0)]])))    
+                                          layer1,layer2,factor,epochs,postStr]])))
+
+
+def make_submission(reuse,block,head,data,batch_size,dim,clip,layer1,layer2,factor,epochs):
+    # set up
+    model = GNN(reuse,block,head,dim,layer1,layer2,factor,**data_dict[data]).to('cuda:0')
+    submission = pd.read_csv('../Data/sample_submission.csv')
+    
+    for i in range(8):
+        # load test data and type_id
+        with open(data.format('test').split('pickle')[0][:-1]+'_type_'+str(i)+'.pickle', 'rb') as handle:
+            test_data = pickle.load(handle)
+        test_list = [Data(**d) for d in test_data]
+        test_dl = DataLoader(test_list,batch_size,shuffle=False)
+        with open(data.format('test').split('pickle')[0][:-1]+'_id_type_'+str(i)+'.pickle', 'rb') as handle:
+            test_id = pickle.load(handle)
+    
+    
+        # load model
+        checkpoint = torch.load('../Model/{}.tar'.format('_'.join([str(i).split('}')[1] if '}' in str(i) else str(i) \
+                                            for i in [reuse,block,head,data,batch_size,dim,clip,\
+                                                  layer1,layer2,factor,epochs,'type_'+str(i)]])))
+        model.load_state_dict(checkpoint['model_state_dict'])
+    
+    
+        # predict
+        model.eval()
+        yhat_list = []
+        with torch.no_grad():
+            for data_torch in test_dl:
+                data_torch = data_torch.to('cuda:0')
+                yhat_list.append(model(data_torch,False,True))
+        yhat = torch.cat(yhat_list).cpu().detach().numpy()        
+        
+        # join
+        submit_ = dict(zip(test_id,yhat))
+        submission['type_'+str(i)] = submission.id.map(submit_)
+    
+    # save types results    
+    submission.to_csv('../Submission/{}.csv'.format('_'.join([str(i).split('}')[1] if '}' in str(i) else str(i) \
+                                        for i in [reuse,block,head,data,batch_size,dim,clip,\
+                                              layer1,layer2,factor,epochs,'all_types']])),\
+                      index=False)
+    
+    # save final results for submission
+    submission['scalar_coupling_constant'] = submission.iloc[:,2:].mean(1)
+    submission = submission[['id','scalar_coupling_constant']]
+    submission = submission[['id','scalar_coupling_constant']]
+    
+    submission.to_csv('../Submission/{}.csv'.format('_'.join([str(i).split('}')[1] if '}' in str(i) else str(i) \
+                                        for i in [reuse,block,head,data,batch_size,dim,clip,\
+                                              layer1,layer2,factor,epochs,'final']])),\
+                      index=False)
