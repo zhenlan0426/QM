@@ -243,6 +243,20 @@ class schnet_block(torch.nn.Module):
         return x + m
 
 
+class NNConv_block(torch.nn.Module):
+    # use both types of edges
+    def __init__(self,dim=64,edge_dim=12):
+        super(NNConv_block, self).__init__()
+        
+        nn = Sequential(BatchNorm1d(edge_dim),Linear(edge_dim, dim*dim))
+        self.conv = NNConv(dim, dim, nn, aggr='mean', root_weight=False)
+        self.gru = GRU(dim, dim)
+        
+    def forward(self, x, edge_index, edge_attr):
+        m = F.relu(self.conv(x, edge_index, edge_attr))
+        out, _ = self.gru(m.unsqueeze(0), x.unsqueeze(0))
+        return out.squeeze(0)
+
 '''------------------------------------------------------------------------------------------------------------------'''
 '''------------------------------------------------------ Main ------------------------------------------------------'''
 '''------------------------------------------------------------------------------------------------------------------'''
