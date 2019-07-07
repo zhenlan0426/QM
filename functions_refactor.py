@@ -446,7 +446,6 @@ def make_submission(reuse,block,head,data,batch_size,dim,clip,layer1,layer2,fact
     # save final results for submission
     submission['scalar_coupling_constant'] = submission.iloc[:,2:].mean(1)
     submission = submission[['id','scalar_coupling_constant']]
-    submission = submission[['id','scalar_coupling_constant']]
     
     submission.to_csv('../Submission/{}.csv'.format('_'.join([str(i).split('}')[1] if '}' in str(i) else str(i) \
                                         for i in [reuse,block,head,data,batch_size,dim,clip,\
