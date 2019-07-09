@@ -139,7 +139,7 @@ class cat3Head(torch.nn.Module):
         self.lin_bias = Linear(edge_in3, 1, bias=False)
         #self.norm = BatchNorm1d(dim*cat_factor)
         
-    def forward(self,x,edge_index3,edge_attr3,edge_attr4):
+    def forward(self,x,edge_index3,edge_attr3,edge_attr4,batch):
         temp = x[edge_index3] # (2,N,d)
         yhat = torch.cat([temp.mean(0),temp[0]*temp[1],(temp[0]-temp[1])**2],1)
         #yhat = self.norm(yhat)
@@ -159,9 +159,60 @@ class cat3Head_type(torch.nn.Module):
                                  #BatchNorm1d(dim*cat_factor*2),
                                  Linear(dim*cat_factor*2,1))
         
-    def forward(self,x,edge_index3,edge_attr3,edge_attr4):
+    def forward(self,x,edge_index3,edge_attr3,edge_attr4,batch):
         temp = x[edge_index3] # (2,N,d)
         yhat = torch.cat([temp.mean(0),temp[0]*temp[1],(temp[0]-temp[1])**2],1)
+        yhat = self.linear(yhat).squeeze(1)
+        return yhat
+
+class swapHead_type(torch.nn.Module):
+    def __init__(self,dim,edge_in3,edge_in4):
+        cat_factor = 2
+        super(swapHead_type, self).__init__()
+        self.linear = Sequential(#BatchNorm1d(dim*cat_factor),
+                                 Linear(dim*cat_factor,dim*cat_factor*2),
+                                 ReLU(inplace=True),
+                                 #BatchNorm1d(dim*cat_factor*2),
+                                 Linear(dim*cat_factor*2,1))
+        
+    def forward(self,x,edge_index3,edge_attr3,edge_attr4,batch):
+        temp = x[edge_index3] # (2,N,d)
+        yhat = torch.cat([torch.cat([temp[0],temp[1]],1),torch.cat([temp[1],temp[0]],1)],0)
+        yhat = self.linear(yhat).squeeze(1).reshape(2,-1).mean(0)
+        return yhat
+    
+class cat3HeadPool_type(torch.nn.Module):
+    def __init__(self,dim,edge_in3,edge_in4,processing_steps=6):
+        cat_factor = 5
+        super(cat3HeadPool_type, self).__init__()
+        self.set2set = Set2Set(dim,processing_steps=processing_steps)
+        self.linear = Sequential(#BatchNorm1d(dim*cat_factor),
+                                 Linear(dim*cat_factor,dim*cat_factor*2),
+                                 ReLU(inplace=True),
+                                 #BatchNorm1d(dim*cat_factor*2),
+                                 Linear(dim*cat_factor*2,1))
+        
+    def forward(self,x,edge_index3,edge_attr3,edge_attr4,batch):
+        coupling_batch_index = batch[edge_index3[0]]
+        pool = self.set2set(x, batch) # (m,d)
+        pool = pool[coupling_batch_index] # (n_target,d)
+        temp = x[edge_index3] # (2,n_target,d)
+        yhat = torch.cat([temp.mean(0),temp[0]*temp[1],(temp[0]-temp[1])**2,pool],1)  
+        yhat = self.linear(yhat).squeeze(1)
+        return yhat
+
+class set2setHead_type(torch.nn.Module):
+    def __init__(self,dim,edge_in3,edge_in4,processing_steps=6,num_layers=2):
+        super(set2setHead_type, self).__init__()
+        self.head = Set2Set(dim,processing_steps=processing_steps,num_layers=num_layers)
+        self.linear = Linear(dim*2,1)
+        
+    def forward(self,x,edge_index3,edge_attr3,edge_attr4,batch):
+        n = edge_index3.shape[1]
+        range_ = torch.arange(n)
+        batch_index = torch.cat([range_,range_]).to('cuda:0')
+        temp = x[edge_index3].reshape(2*n,-1) # (2*n_target,d)
+        yhat = self.head(temp,batch_index)
         yhat = self.linear(yhat).squeeze(1)
         return yhat
     
@@ -307,7 +358,7 @@ class GNN(torch.nn.Module):
             edge_attr3 = data.edge_attr3
             edge_attr4 = data.edge_attr4
             
-        yhat = self.head(out,edge_index3,edge_attr3,edge_attr4)
+        yhat = self.head(out,edge_index3,edge_attr3,edge_attr4,data.batch)
         
         if IsTrain:
             k = torch.sum(edge_attr3,0)
