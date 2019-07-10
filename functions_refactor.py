@@ -8,7 +8,7 @@ Created on Thu Jul  4 08:47:11 2019
 
 import torch
 import torch.nn.functional as F
-from torch.nn import Sequential, Linear, ReLU, GRU,BatchNorm1d,Dropout,RReLU
+from torch.nn import Sequential, Linear, ReLU, GRU,BatchNorm1d,Dropout,LeakyReLU
 from torch_geometric.nn import NNConv,GATConv
 import torch.nn as nn
 from torch.nn.utils import clip_grad_value_
@@ -19,13 +19,15 @@ from torch.nn import Parameter
 from torch_geometric.nn.conv import MessagePassing
 from torch_geometric.nn.inits import reset,uniform
 from torch_geometric.data import Data,DataLoader
+from torch_geometric.utils import scatter_
 
 import time
 import pickle
 import numpy as np
 import pandas as pd
 import copy
-
+import sys
+import inspect
 '''------------------------------------------------------------------------------------------------------------------'''
 '''------------------------------------------------------ Data ------------------------------------------------------'''
 '''------------------------------------------------------------------------------------------------------------------'''
@@ -42,6 +44,16 @@ columns = ['reuse',
 		   'layer1',
 		   'layer2',
 		   'factor']
+
+
+special_args = [
+    'edge_index', 'edge_index_i', 'edge_index_j', 'size', 'size_i', 'size_j'
+]
+__size_error_msg__ = ('All tensors which should get mapped to the same source '
+                      'or target nodes must be of same size in dimension 0.')
+
+is_python2 = sys.version_info[0] < 3
+getargspec = inspect.getargspec if is_python2 else inspect.getfullargspec
 
 '''------------------------------------------------------------------------------------------------------------------'''
 '''------------------------------------------------------ Head ------------------------------------------------------'''
@@ -219,6 +231,116 @@ class set2setHead_type(torch.nn.Module):
 '''------------------------------------------------------------------------------------------------------------------'''
 '''------------------------------------------------------ Conv ------------------------------------------------------'''
 '''------------------------------------------------------------------------------------------------------------------'''
+class MessagePassing_edgeUpdate(torch.nn.Module):
+
+    def __init__(self, aggr='add', flow='source_to_target'):
+        super(MessagePassing_edgeUpdate, self).__init__()
+
+        self.aggr = aggr
+        assert self.aggr in ['add', 'mean', 'max']
+
+        self.flow = flow
+        assert self.flow in ['source_to_target', 'target_to_source']
+
+        self.__message_args__ = getargspec(self.message)[0][1:]
+        self.__special_args__ = [(i, arg)
+                                 for i, arg in enumerate(self.__message_args__)
+                                 if arg in special_args]
+        self.__message_args__ = [
+            arg for arg in self.__message_args__ if arg not in special_args
+        ]
+        self.__update_args__ = getargspec(self.update)[0][2:]
+
+    def propagate(self, edge_index, size=None, **kwargs):
+        r"""The initial call to start propagating messages.
+
+        Args:
+            edge_index (Tensor): The indices of a general (sparse) assignment
+                matrix with shape :obj:`[N, M]` (can be directed or
+                undirected).
+            size (list or tuple, optional): The size :obj:`[N, M]` of the
+                assignment matrix. If set to :obj:`None`, the size is tried to
+                get automatically inferrred. (default: :obj:`None`)
+            **kwargs: Any additional data which is needed to construct messages
+                and to update node embeddings.
+        """
+
+        size = [None, None] if size is None else list(size)
+        assert len(size) == 2
+
+        i, j = (0, 1) if self.flow == 'target_to_source' else (1, 0)
+        ij = {"_i": i, "_j": j}
+
+        message_args = []
+        for arg in self.__message_args__:
+            if arg[-2:] in ij.keys():
+                tmp = kwargs.get(arg[:-2], None)
+                if tmp is None:  # pragma: no cover
+                    message_args.append(tmp)
+                else:
+                    idx = ij[arg[-2:]]
+                    if isinstance(tmp, tuple) or isinstance(tmp, list):
+                        assert len(tmp) == 2
+                        if tmp[1 - idx] is not None:
+                            if size[1 - idx] is None:
+                                size[1 - idx] = tmp[1 - idx].size(0)
+                            if size[1 - idx] != tmp[1 - idx].size(0):
+                                raise ValueError(__size_error_msg__)
+                        tmp = tmp[idx]
+
+                    if tmp is None:
+                        message_args.append(tmp)
+                    else:
+                        if size[idx] is None:
+                            size[idx] = tmp.size(0)
+                        if size[idx] != tmp.size(0):
+                            raise ValueError(__size_error_msg__)
+
+                        tmp = torch.index_select(tmp, 0, edge_index[idx])
+                        message_args.append(tmp)
+            else:
+                message_args.append(kwargs.get(arg, None))
+
+        size[0] = size[1] if size[0] is None else size[0]
+        size[1] = size[0] if size[1] is None else size[1]
+
+        kwargs['edge_index'] = edge_index
+        kwargs['size'] = size
+
+        for (idx, arg) in self.__special_args__:
+            if arg[-2:] in ij.keys():
+                message_args.insert(idx, kwargs[arg[:-2]][ij[arg[-2:]]])
+            else:
+                message_args.insert(idx, kwargs[arg])
+
+        update_args = [kwargs[arg] for arg in self.__update_args__]
+
+        out,edge_ = self.message(*message_args)
+        out = scatter_(self.aggr, out, edge_index[i], dim_size=size[i])
+        out = self.update(out, *update_args)
+
+        return out,edge_
+
+
+    def message(self, x_j):  # pragma: no cover
+        r"""Constructs messages in analogy to :math:`\phi_{\mathbf{\Theta}}`
+        for each edge in :math:`(i,j) \in \mathcal{E}`.
+        Can take any argument which was initially passed to :meth:`propagate`.
+        In addition, features can be lifted to the source node :math:`i` and
+        target node :math:`j` by appending :obj:`_i` or :obj:`_j` to the
+        variable name, *.e.g.* :obj:`x_i` and :obj:`x_j`."""
+
+        return x_j
+
+
+    def update(self, aggr_out):  # pragma: no cover
+        r"""Updates node embeddings in analogy to
+        :math:`\gamma_{\mathbf{\Theta}}` for each node
+        :math:`i \in \mathcal{V}`.
+        Takes in the output of aggregation as first argument and any argument
+        which was initially passed to :meth:`propagate`."""
+
+        return aggr_out
 
 class NNConv2(MessagePassing):
     r""" use element-wise multiplication as in schnet instead of matrix multiplication
@@ -308,10 +430,72 @@ class NNConv_block(torch.nn.Module):
         out, _ = self.gru(m.unsqueeze(0), x.unsqueeze(0))
         return out.squeeze(0)
 
+
+class MEGNet(MessagePassing_edgeUpdate):
+    def __init__(self,dim):
+        super(MEGNet, self).__init__(aggr='mean')
+        cat_factor = 2
+        multiple_factor = 3
+        self.dim = dim
+        self.v_update = Sequential(BatchNorm1d(dim*cat_factor),
+                                    Linear(dim*cat_factor,dim*cat_factor*multiple_factor),
+                                    LeakyReLU(inplace=True),
+                                    BatchNorm1d(dim*cat_factor*multiple_factor),
+                                    Linear(dim*cat_factor*multiple_factor,dim),
+                                    LeakyReLU(inplace=True))
+        
+        self.e_update = Sequential(BatchNorm1d(dim*cat_factor),
+                                    Linear(dim*cat_factor,dim*cat_factor*multiple_factor),
+                                    LeakyReLU(inplace=True),
+                                    BatchNorm1d(dim*cat_factor*multiple_factor),
+                                    Linear(dim*cat_factor*multiple_factor,dim),
+                                    LeakyReLU(inplace=True),)
+
+    def forward(self, x, edge_index, edge_attr):
+        return self.propagate(edge_index, x=x, edge_attr=edge_attr)
+
+    def message(self, x_i, x_j, edge_attr):
+        out = self.e_update(torch.cat([x_i+x_j,edge_attr],1))
+        return out,out
+
+    def update(self, aggr_out, x):
+        return self.v_update(torch.cat([aggr_out,x],1))
+
+    def __repr__(self):
+        return 'MEGNet'
+
+class MEGNet_block(torch.nn.Module):
+    def __init__(self,dim):
+        super(MEGNet_block, self).__init__()
+        cat_factor = 1
+        multiple_factor = 3        
+        self.v_update =  Sequential(BatchNorm1d(dim*cat_factor),
+                                    Linear(dim*cat_factor,dim*cat_factor*multiple_factor),
+                                    LeakyReLU(inplace=True),
+                                    BatchNorm1d(dim*cat_factor*multiple_factor),
+                                    Linear(dim*cat_factor*multiple_factor,dim))
+        self.e_update = Sequential( BatchNorm1d(dim*cat_factor),
+                                    Linear(dim*cat_factor,dim*cat_factor*multiple_factor),
+                                    BatchNorm1d(dim*cat_factor*multiple_factor),
+                                    LeakyReLU(inplace=True),
+                                    Linear(dim*cat_factor*multiple_factor,dim))        
+        self.conv = MEGNet(dim)
+    
+    def forward(self, x, edge_index, edge_attr):
+        x_new,edge_new = self.conv(x, edge_index, edge_attr)
+        x_new = self.v_update(x_new)
+        edge_new = self.e_update(edge_new)
+        return x+x_new,edge_attr+edge_new
+    
+    def __repr__(self):
+        return 'MEGNet_block'    
+    
 '''------------------------------------------------------------------------------------------------------------------'''
 '''------------------------------------------------------ Main ------------------------------------------------------'''
 '''------------------------------------------------------------------------------------------------------------------'''
 
+
+    
 
 class GNN(torch.nn.Module):
 
@@ -371,6 +555,72 @@ class GNN(torch.nn.Module):
         else:
             return yhat
         
+class GNN_edgeUpdate(torch.nn.Module):
+
+    def __init__(self,reuse,block,dim,layer1,layer2,factor,\
+                 node_in,edge_in,edge_in4,edge_in3=8):
+        # block,head are nn.Module
+        # node_in,edge_in are dim for bonding and edge_in4,edge_in3 for coupling
+        super(GNN_edgeUpdate, self).__init__()
+        self.lin_node = Sequential(BatchNorm1d(node_in),Linear(node_in, dim*factor),LeakyReLU(), \
+                                   BatchNorm1d(dim*factor),Linear(dim*factor, dim),LeakyReLU())
+
+        self.edge1 = Sequential(BatchNorm1d(edge_in),Linear(edge_in, dim*factor),LeakyReLU(), \
+                                   BatchNorm1d(dim*factor),Linear(dim*factor, dim),LeakyReLU())
+
+        self.edge2 = Sequential(BatchNorm1d(edge_in4+edge_in3),Linear(edge_in4+edge_in3, dim*factor),LeakyReLU(), \
+                                   BatchNorm1d(dim*factor),Linear(dim*factor, dim),LeakyReLU())        
+        if reuse:
+            self.conv1 = block(dim=dim,edge_dim=edge_in)
+            self.conv2 = block(dim=dim,edge_dim=edge_in3+edge_in4)
+        else:
+            self.conv1 = nn.ModuleList([block(dim=dim) for _ in range(layer1)])
+            self.conv2 = nn.ModuleList([block(dim=dim) for _ in range(layer2)])            
+        
+        self.head = Sequential(Linear(dim, dim*factor),ReLU(), \
+                               Linear(dim*factor, 1))
+        
+    def forward(self, data,IsTrain=False,typeTrain=False):
+        out = self.lin_node(data.x)
+        # edge_*3 only does not repeat for undirected graph. Hence need to add (j,i) to (i,j) in edges
+        edge_index3 = torch.cat([data.edge_index3,data.edge_index3[[1,0]]],1)
+        n = data.edge_attr3.shape[0]
+        temp_ = self.edge2(torch.cat([data.edge_attr3,data.edge_attr4],1))
+        edge_attr3 = torch.cat([temp_,temp_],0)
+        
+        edge_attr = self.edge1(data.edge_attr)
+        for conv in self.conv1:
+            out,edge_attr = conv(out,data.edge_index,edge_attr)
+        
+        for conv in self.conv2:
+            out,edge_attr3 = conv(out,edge_index3,edge_attr3)    
+        
+        edge_attr3 = edge_attr3[:n]
+        if typeTrain:
+            if IsTrain:
+                y = data.y[data.type_attr]
+            edge_attr3 = edge_attr3[data.type_attr]
+            edge_attr3_old = data.edge_attr3[data.type_attr]
+        else:
+            if IsTrain:
+                y = data.y
+            
+        yhat = self.head(edge_attr3).squeeze(1)
+        
+        if IsTrain:
+            k = torch.sum(edge_attr3_old,0)
+            nonzeroIndex = torch.nonzero(k).squeeze(1)
+            abs_ = torch.abs(y-yhat).unsqueeze(1)
+            loss_perType = torch.zeros(8,device='cuda:0')
+            loss_perType[nonzeroIndex] = torch.log(torch.sum(abs_ * edge_attr3_old[:,nonzeroIndex],0)/k[nonzeroIndex])
+            loss = torch.sum(loss_perType)/nonzeroIndex.shape[0]
+            return loss,loss_perType
+        else:
+            return yhat
+
+'''------------------------------------------------------------------------------------------------------------------'''
+'''----------------------------------------------------- utility -----------------------------------------------------'''
+'''------------------------------------------------------------------------------------------------------------------'''
 
 def get_data(data,batch_size):
     with open(data.format('train'), 'rb') as handle:
