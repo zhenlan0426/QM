@@ -177,6 +177,31 @@ class cat3Head_type(torch.nn.Module):
         yhat = self.linear(yhat).squeeze(1)
         return yhat
 
+class feedforwardHead_Update(torch.nn.Module):
+    def __init__(self,dim):
+        factor = 2
+        super(feedforwardHead_Update, self).__init__()
+        self.linear = Sequential(Linear(dim, dim*factor),ReLU(), \
+                                 Linear(dim*factor, 1))
+        
+    def forward(self,x,edge_index3,edge_attr3):
+        yhat = self.linear(edge_attr3).squeeze(1)
+        return yhat
+
+class feedforwardCombineHead_Update(torch.nn.Module):
+    def __init__(self,dim):
+        factor = 2
+        cat_factor = 4
+        super(feedforwardCombineHead_Update, self).__init__()
+        self.linear = Sequential(Dropout(0.33),Linear(dim*cat_factor, dim*cat_factor*factor),ReLU(), \
+                                 Dropout(0.33),Linear(dim*cat_factor*factor, 1))
+        
+    def forward(self,x,edge_index3,edge_attr3):
+        temp = x[edge_index3] # (2,N,d)
+        yhat = torch.cat([temp.mean(0),temp[0]*temp[1],(temp[0]-temp[1])**2,edge_attr3],1)
+        yhat = self.linear(yhat).squeeze(1)
+        return yhat
+    
 class swapHead_type(torch.nn.Module):
     def __init__(self,dim,edge_in3,edge_in4):
         cat_factor = 2
@@ -557,7 +582,7 @@ class GNN(torch.nn.Module):
         
 class GNN_edgeUpdate(torch.nn.Module):
 
-    def __init__(self,reuse,block,dim,layer1,layer2,factor,\
+    def __init__(self,reuse,block,head,dim,layer1,layer2,factor,\
                  node_in,edge_in,edge_in4,edge_in3=8):
         # block,head are nn.Module
         # node_in,edge_in are dim for bonding and edge_in4,edge_in3 for coupling
@@ -571,14 +596,13 @@ class GNN_edgeUpdate(torch.nn.Module):
         self.edge2 = Sequential(BatchNorm1d(edge_in4+edge_in3),Linear(edge_in4+edge_in3, dim*factor),LeakyReLU(), \
                                    BatchNorm1d(dim*factor),Linear(dim*factor, dim),LeakyReLU())        
         if reuse:
-            self.conv1 = block(dim=dim,edge_dim=edge_in)
-            self.conv2 = block(dim=dim,edge_dim=edge_in3+edge_in4)
+            self.conv1 = block(dim=dim)
+            self.conv2 = block(dim=dim)
         else:
             self.conv1 = nn.ModuleList([block(dim=dim) for _ in range(layer1)])
             self.conv2 = nn.ModuleList([block(dim=dim) for _ in range(layer2)])            
         
-        self.head = Sequential(Linear(dim, dim*factor),ReLU(), \
-                               Linear(dim*factor, 1))
+        self.head = head(dim)
         
     def forward(self, data,IsTrain=False,typeTrain=False):
         out = self.lin_node(data.x)
@@ -600,12 +624,15 @@ class GNN_edgeUpdate(torch.nn.Module):
             if IsTrain:
                 y = data.y[data.type_attr]
             edge_attr3 = edge_attr3[data.type_attr]
+            edge_index3 = data.edge_index3[:,data.type_attr]
             edge_attr3_old = data.edge_attr3[data.type_attr]
         else:
             if IsTrain:
                 y = data.y
+            edge_index3 = data.edge_index3
+            edge_attr3_old = data.edge_attr3
             
-        yhat = self.head(edge_attr3).squeeze(1)
+        yhat = self.head(out,edge_index3,edge_attr3)
         
         if IsTrain:
             k = torch.sum(edge_attr3_old,0)
