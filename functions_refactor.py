@@ -32,7 +32,8 @@ import inspect
 '''------------------------------------------------------ Data ------------------------------------------------------'''
 '''------------------------------------------------------------------------------------------------------------------'''
 data_dict = {'../Data/{}_data_ACSF.pickle':{'node_in':89,'edge_in':19,'edge_in4':1},\
-             '../Data/{}_data_ACSF_expand.pickle':{'node_in':89,'edge_in':19+25,'edge_in4':1+25}}
+             '../Data/{}_data_ACSF_expand.pickle':{'node_in':89,'edge_in':19+25,'edge_in4':1+25},\
+             '../Data/{}_data_ACSF_expand_PCA.pickle':{'node_in':32,'edge_in':19+25,'edge_in4':1+25}}
 
 columns = ['reuse',
 		   'block',
@@ -703,11 +704,12 @@ def train(opt,model,epochs,train_dl,val_dl,paras,clip,typeTrain=False,train_loss
                 val_loss_perType += loss_perType.cpu().detach().numpy()
         
         # save model
-        if loss.item()<lossBest:
-            lossBest = loss.item()
+        val_loss = val_loss/j
+        if val_loss<lossBest:
+            lossBest = val_loss
             torch.save({'model_state_dict': model.state_dict()},'../Model/tmp.tar')
             
-        print('epoch:{}, train_loss: {:+.3f}, val_loss: {:+.3f}, \ntrain_vector: {}, \nval_vector  : {}\n'.format(epoch+epoch0,train_loss/i,val_loss/j,\
+        print('epoch:{}, train_loss: {:+.3f}, val_loss: {:+.3f}, \ntrain_vector: {}, \nval_vector  : {}\n'.format(epoch+epoch0,train_loss/i,val_loss,\
                                                             '|'.join(['%+.2f'%i for i in train_loss_perType/i]),\
                                                             '|'.join(['%+.2f'%i for i in val_loss_perType/j])))
         train_loss_list.append(train_loss_perType/i)
@@ -721,6 +723,64 @@ def train(opt,model,epochs,train_dl,val_dl,paras,clip,typeTrain=False,train_loss
     model.load_state_dict(checkpoint['model_state_dict'])
     return model,train_loss_list,val_loss_list
     
+def train_type(opt,model,epochs,train_dl,val_dl,paras,clip,typeTrain=False,train_loss_list=None,val_loss_list=None):
+    since = time.time()
+    
+    lossBest = [1e6] * 8
+    bestWeight = [None] * 8
+    if train_loss_list is None:
+        train_loss_list,val_loss_list = [],[]
+        epoch0 = 0
+    else:
+        epoch0 = len(train_loss_list)
+        
+    opt.zero_grad()
+    for epoch in range(epochs):
+        # training #
+        model.train()
+        np.random.seed()
+        train_loss = 0
+        train_loss_perType = np.zeros(8)
+        val_loss = 0
+        val_loss_perType = np.zeros(8)
+        
+        for i,data in enumerate(train_dl):
+            data = data.to('cuda:0')
+            loss,loss_perType = model(data,True,typeTrain)
+            loss.backward()
+            clip_grad_value_(paras,clip)
+            opt.step()
+            opt.zero_grad()
+            train_loss += loss.item()
+            train_loss_perType += loss_perType.cpu().detach().numpy()
+            
+        # evaluating #
+        model.eval()
+        with torch.no_grad():
+            for j,data in enumerate(val_dl):
+                data = data.to('cuda:0')
+                loss,loss_perType = model(data,True,typeTrain)
+                val_loss += loss.item()
+                val_loss_perType += loss_perType.cpu().detach().numpy()
+        
+        # save model
+        val_loss_perType = val_loss_perType/j
+        for index_ in range(8):
+            if val_loss_perType[index_]<lossBest[index_]:
+                lossBest[index_] = val_loss_perType[index_]
+                bestWeight[index_] = copy.deepcopy(model.state_dict())
+            
+        print('epoch:{}, train_loss: {:+.3f}, val_loss: {:+.3f}, \ntrain_vector: {}, \nval_vector  : {}\n'.format(epoch+epoch0,train_loss/i,val_loss/j,\
+                                                            '|'.join(['%+.2f'%i for i in train_loss_perType/i]),\
+                                                            '|'.join(['%+.2f'%i for i in val_loss_perType])))
+        train_loss_list.append(train_loss_perType/i)
+        val_loss_list.append(val_loss_perType/j)
+        
+    time_elapsed = time.time() - since
+    print('Training completed in {}s'.format(time_elapsed))
+    
+    return model,train_loss_list,val_loss_list,bestWeight
+
     
 def save_results(train_loss_perType,val_loss_perType,reuse,block,head,data,batch_size,dim,clip,layer1,layer2,factor,epochs,postStr='base'):
     epochs = len(train_loss_perType)
@@ -744,6 +804,16 @@ def save_model(model,opt,reuse,block,head,data,batch_size,dim,clip,layer1,layer2
                                           layer1,layer2,factor,epochs,postStr]])))
 
 
+def save_model_type(bestWeight,opt,reuse,block,head,data,batch_size,dim,clip,layer1,layer2,factor,epochs,postStr='base'):
+    opt_state = opt.state_dict()
+    for i,w in enumerate(bestWeight):
+        torch.save({'model_state_dict': w,
+                'optimizer_state_dict': opt_state,
+                'epochs':epochs
+                }, '../Model/{}.tar'.format('_'.join([str(i).split('}')[1] if '}' in str(i) else str(i) \
+                                        for i in [reuse,block,head,data,batch_size,dim,clip,\
+                                              layer1,layer2,factor,epochs,'type_'+str(i)+postStr]])))    
+    
 def make_submission(reuse,block,head,data,batch_size,dim,clip,layer1,layer2,factor,epochs,postStr=''):
     # set up
     model = GNN(reuse,block,head,dim,layer1,layer2,factor,**data_dict[data]).to('cuda:0')
@@ -793,3 +863,15 @@ def make_submission(reuse,block,head,data,batch_size,dim,clip,layer1,layer2,fact
                                         for i in [reuse,block,head,data,batch_size,dim,clip,\
                                               layer1,layer2,factor,epochs,'final'+postStr]])),\
                       index=False)
+    
+def average_submission(lol,submission,name='combine_type.csv'):
+    # take in a 8 element list of list, [[sub1,sub2],...,[]]
+    # i-th element contains a list of string for best submission for type-i, that will be averaged over
+    for i,type_i in enumerate(lol):
+        for sub in type_i:
+            submit_df = pd.read_csv('../Submission/'+sub)['type_'+str(i)]
+            submission = pd.concat([submission,submit_df],1)
+    
+    submission['scalar_coupling_constant'] = submission.iloc[:,2:].mean(1)
+    submission = submission[['id','scalar_coupling_constant']]
+    submission.to_csv('../Submission/'+name,index=False)    
