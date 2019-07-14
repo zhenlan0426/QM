@@ -774,7 +774,7 @@ def train_type(opt,model,epochs,train_dl,val_dl,paras,clip,typeTrain=False,train
                                                             '|'.join(['%+.2f'%i for i in train_loss_perType/i]),\
                                                             '|'.join(['%+.2f'%i for i in val_loss_perType])))
         train_loss_list.append(train_loss_perType/i)
-        val_loss_list.append(val_loss_perType/j)
+        val_loss_list.append(val_loss_perType)
         
     time_elapsed = time.time() - since
     print('Training completed in {}s'.format(time_elapsed))
@@ -814,7 +814,7 @@ def save_model_type(bestWeight,opt,reuse,block,head,data,batch_size,dim,clip,lay
                                         for i in [reuse,block,head,data,batch_size,dim,clip,\
                                               layer1,layer2,factor,epochs,'type_'+str(i)+postStr]])))    
     
-def make_submission(reuse,block,head,data,batch_size,dim,clip,layer1,layer2,factor,epochs,postStr=''):
+def make_submission(reuse,block,head,data,batch_size,dim,clip,layer1,layer2,factor,epochs,postStr='base'):
     # set up
     model = GNN(reuse,block,head,dim,layer1,layer2,factor,**data_dict[data]).to('cuda:0')
     submission = pd.read_csv('../Data/sample_submission.csv')
