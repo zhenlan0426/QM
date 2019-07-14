@@ -33,7 +33,8 @@ import inspect
 '''------------------------------------------------------------------------------------------------------------------'''
 data_dict = {'../Data/{}_data_ACSF.pickle':{'node_in':89,'edge_in':19,'edge_in4':1},\
              '../Data/{}_data_ACSF_expand.pickle':{'node_in':89,'edge_in':19+25,'edge_in4':1+25},\
-             '../Data/{}_data_ACSF_expand_PCA.pickle':{'node_in':32,'edge_in':19+25,'edge_in4':1+25}}
+             '../Data/{}_data_ACSF_expand_PCA.pickle':{'node_in':32,'edge_in':19+25,'edge_in4':1+25},\
+             '../Data/{}_data_ACSF_expand_PCA_otherInfo.pickle':{'node_in':32,'edge_in':19+25,'edge_in4':1+25}}
 
 columns = ['reuse',
 		   'block',
@@ -726,6 +727,7 @@ def train(opt,model,epochs,train_dl,val_dl,paras,clip,typeTrain=False,train_loss
     return model,train_loss_list,val_loss_list
     
 def train_type(opt,model,epochs,train_dl,val_dl,paras,clip,typeTrain=False,train_loss_list=None,val_loss_list=None):
+    # for MEGNet
     since = time.time()
     
     lossBest = [1e6] * 8
