@@ -664,7 +664,7 @@ def get_data(data,batch_size):
     return train_dl,val_dl
 
 
-def train(opt,model,epochs,train_dl,val_dl,paras,clip,typeTrain=False,train_loss_list=None,val_loss_list=None):
+def train(opt,model,epochs,train_dl,val_dl,paras,clip,typeTrain=False,train_loss_list=None,val_loss_list=None,scheduler=None):
     since = time.time()
     
     lossBest = 1e6
@@ -714,6 +714,8 @@ def train(opt,model,epochs,train_dl,val_dl,paras,clip,typeTrain=False,train_loss
                                                             '|'.join(['%+.2f'%i for i in val_loss_perType/j])))
         train_loss_list.append(train_loss_perType/i)
         val_loss_list.append(val_loss_perType/j)
+        if scheduler is not None:
+            scheduler.step(val_loss)
         
     time_elapsed = time.time() - since
     print('Training completed in {}s'.format(time_elapsed))
@@ -872,6 +874,7 @@ def average_submission(lol,submission,name='combine_type.csv'):
             submit_df = pd.read_csv('../Submission/'+sub)['type_'+str(i)]
             submission = pd.concat([submission,submit_df],1)
     
-    submission['scalar_coupling_constant'] = submission.iloc[:,2:].mean(1)
+    temp = submission.iloc[:,2:].mean(1)
     submission = submission[['id','scalar_coupling_constant']]
-    submission.to_csv('../Submission/'+name,index=False)    
+    submission['scalar_coupling_constant'] = temp
+    submission.to_csv('../Submission/'+name,index=False)      
