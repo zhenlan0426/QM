@@ -34,6 +34,7 @@ import inspect
 data_dict = {'../Data/{}_data_ACSF.pickle':{'node_in':89,'edge_in':19,'edge_in4':1},\
              '../Data/{}_data_ACSF_expand.pickle':{'node_in':89,'edge_in':19+25,'edge_in4':1+25},\
              '../Data/{}_data_ACSF_expand_PCA.pickle':{'node_in':32,'edge_in':19+25,'edge_in4':1+25},\
+             '../Data/{}_data_SOAP_expand_PCA.pickle':{'node_in':48,'edge_in':19+25,'edge_in4':1+25},\
              '../Data/{}_data_ACSF_expand_PCA_otherInfo.pickle':{'node_in':32,'edge_in':19+25,'edge_in4':1+25}}
 
 columns = ['reuse',
@@ -535,8 +536,8 @@ class GNN(torch.nn.Module):
                                    BatchNorm1d(dim*factor),Linear(dim*factor, dim),ReLU())
         
         if reuse:
-            self.conv1 = block(dim=dim,edge_dim=edge_in)
-            self.conv2 = block(dim=dim,edge_dim=edge_in3+edge_in4)
+            self.conv1 = nn.ModuleList([block(dim=dim,edge_dim=edge_in)] * layer1)
+            self.conv2 = nn.ModuleList([block(dim=dim,edge_dim=edge_in3+edge_in4)] * layer2)
         else:
             self.conv1 = nn.ModuleList([block(dim=dim,edge_dim=edge_in) for _ in range(layer1)])
             self.conv2 = nn.ModuleList([block(dim=dim,edge_dim=edge_in3+edge_in4) for _ in range(layer2)])            
@@ -606,7 +607,7 @@ class GNN_edgeUpdate(torch.nn.Module):
         
         self.head = head(dim)
         
-    def forward(self, data,IsTrain=False,typeTrain=False):
+    def forward(self, data,IsTrain=False,typeTrain=False,logLoss=True):
         out = self.lin_node(data.x)
         # edge_*3 only does not repeat for undirected graph. Hence need to add (j,i) to (i,j) in edges
         edge_index3 = torch.cat([data.edge_index3,data.edge_index3[[1,0]]],1)
@@ -641,9 +642,15 @@ class GNN_edgeUpdate(torch.nn.Module):
             nonzeroIndex = torch.nonzero(k).squeeze(1)
             abs_ = torch.abs(y-yhat).unsqueeze(1)
             loss_perType = torch.zeros(8,device='cuda:0')
-            loss_perType[nonzeroIndex] = torch.log(torch.sum(abs_ * edge_attr3_old[:,nonzeroIndex],0)/k[nonzeroIndex])
-            loss = torch.sum(loss_perType)/nonzeroIndex.shape[0]
-            return loss,loss_perType
+            if logLoss:
+                loss_perType[nonzeroIndex] = torch.log(torch.sum(abs_ * edge_attr3_old[:,nonzeroIndex],0)/k[nonzeroIndex])
+                loss = torch.sum(loss_perType)/nonzeroIndex.shape[0]
+                return loss,loss_perType
+            else:
+                loss_perType[nonzeroIndex] = torch.sum(abs_ * edge_attr3_old[:,nonzeroIndex],0)/k[nonzeroIndex]
+                loss = torch.sum(loss_perType)/nonzeroIndex.shape[0]
+                loss_perType[nonzeroIndex] = torch.log(loss_perType[nonzeroIndex])
+                return loss,loss_perType
         else:
             return yhat
 
@@ -726,7 +733,7 @@ def train(opt,model,epochs,train_dl,val_dl,paras,clip,typeTrain=False,train_loss
     model.load_state_dict(checkpoint['model_state_dict'])
     return model,train_loss_list,val_loss_list
     
-def train_type(opt,model,epochs,train_dl,val_dl,paras,clip,typeTrain=False,train_loss_list=None,val_loss_list=None):
+def train_type(opt,model,epochs,train_dl,val_dl,paras,clip,typeTrain=False,train_loss_list=None,val_loss_list=None,scheduler=None,logLoss=True):
     # for MEGNet
     since = time.time()
     
@@ -750,7 +757,7 @@ def train_type(opt,model,epochs,train_dl,val_dl,paras,clip,typeTrain=False,train
         
         for i,data in enumerate(train_dl):
             data = data.to('cuda:0')
-            loss,loss_perType = model(data,True,typeTrain)
+            loss,loss_perType = model(data,True,typeTrain,logLoss)
             loss.backward()
             clip_grad_value_(paras,clip)
             opt.step()
@@ -779,7 +786,9 @@ def train_type(opt,model,epochs,train_dl,val_dl,paras,clip,typeTrain=False,train
                                                             '|'.join(['%+.2f'%i for i in val_loss_perType])))
         train_loss_list.append(train_loss_perType/i)
         val_loss_list.append(val_loss_perType)
-        
+        if scheduler is not None:
+            scheduler.step(val_loss/j)
+            
     time_elapsed = time.time() - since
     print('Training completed in {}s'.format(time_elapsed))
     
