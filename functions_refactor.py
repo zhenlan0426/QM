@@ -9,7 +9,7 @@ Created on Thu Jul  4 08:47:11 2019
 import torch
 import torch.nn.functional as F
 from torch.nn import Sequential, Linear, ReLU, GRU,BatchNorm1d,Dropout,LeakyReLU
-from torch_geometric.nn import NNConv,GATConv
+from torch_geometric.nn import NNConv#,GATConv
 import torch.nn as nn
 from torch.nn.utils import clip_grad_value_
 
@@ -35,6 +35,7 @@ data_dict = {'../Data/{}_data_ACSF.pickle':{'node_in':89,'edge_in':19,'edge_in4'
              '../Data/{}_data_ACSF_expand.pickle':{'node_in':89,'edge_in':19+25,'edge_in4':1+25},\
              '../Data/{}_data_ACSF_expand_PCA.pickle':{'node_in':32,'edge_in':19+25,'edge_in4':1+25},\
              '../Data/{}_data_SOAP_expand_PCA.pickle':{'node_in':48,'edge_in':19+25,'edge_in4':1+25},\
+             '../Data/{}_data_atomInfo.pickle':{'node_in':19,'edge_in':19+25,'edge_in4':1+25},\
              '../Data/{}_data_ACSF_expand_PCA_otherInfo.pickle':{'node_in':32,'edge_in':19+25,'edge_in4':1+25}}
 
 columns = ['reuse',
@@ -255,6 +256,41 @@ class set2setHead_type(torch.nn.Module):
         yhat = self.head(temp,batch_index)
         yhat = self.linear(yhat).squeeze(1)
         return yhat
+
+class head_mol(torch.nn.Module):
+    def __init__(self,dim,mol_shape):
+        factor = 2
+        super(head_mol, self).__init__()
+        self.linear = Sequential(Linear(dim*2, dim*factor),ReLU(), \
+                                 Linear(dim*factor, mol_shape))
+        self.set2set = Set2Set(dim, processing_steps=3)
+        
+    def forward(self,out,batch):
+        out = self.set2set(out, batch)
+        out = self.linear(out).squeeze(1)
+        return out
+
+class head_atom(torch.nn.Module):
+    def __init__(self,dim,atom_shape):
+        factor = 2
+        super(head_atom, self).__init__()
+        self.linear = Sequential(Linear(dim, dim*factor),ReLU(), \
+                                 Linear(dim*factor, atom_shape))
+        
+    def forward(self,out):
+        out = self.linear(out).squeeze(1)
+        return out
+
+class head_edge(torch.nn.Module):
+    def __init__(self,dim,edge_shape):
+        factor = 2
+        super(head_edge, self).__init__()
+        self.linear = Sequential(Linear(dim, dim*factor),ReLU(), \
+                                 Linear(dim*factor, edge_shape))
+        
+    def forward(self,out):
+        out = self.linear(out).squeeze(1)
+        return out
     
 '''------------------------------------------------------------------------------------------------------------------'''
 '''------------------------------------------------------ Conv ------------------------------------------------------'''
@@ -654,6 +690,82 @@ class GNN_edgeUpdate(torch.nn.Module):
         else:
             return yhat
 
+
+class GNN_multiHead(torch.nn.Module):
+    # for MEGNet only
+    def __init__(self,reuse,block,head,head_mol,head_atom,head_edge,dim,layer1,layer2,factor,\
+                 node_in,edge_in,edge_in4,edge_in3=8,mol_shape=4,atom_shape=10,edge_shape=4):
+        # block,head are nn.Module
+        # node_in,edge_in are dim for bonding and edge_in4,edge_in3 for coupling
+        super(GNN_multiHead, self).__init__()
+        self.lin_node = Sequential(BatchNorm1d(node_in),Linear(node_in, dim*factor),LeakyReLU(), \
+                                   BatchNorm1d(dim*factor),Linear(dim*factor, dim),LeakyReLU())
+
+        self.edge1 = Sequential(BatchNorm1d(edge_in),Linear(edge_in, dim*factor),LeakyReLU(), \
+                                   BatchNorm1d(dim*factor),Linear(dim*factor, dim),LeakyReLU())
+
+        self.edge2 = Sequential(BatchNorm1d(edge_in4+edge_in3),Linear(edge_in4+edge_in3, dim*factor),LeakyReLU(), \
+                                   BatchNorm1d(dim*factor),Linear(dim*factor, dim),LeakyReLU())        
+        if reuse:
+            self.conv1 = block(dim=dim)
+            self.conv2 = block(dim=dim)
+        else:
+            self.conv1 = nn.ModuleList([block(dim=dim) for _ in range(layer1)])
+            self.conv2 = nn.ModuleList([block(dim=dim) for _ in range(layer2)])            
+        
+        self.head = head(dim)
+        self.head_mol = head_mol(dim,mol_shape)
+        self.head_atom = head_atom(dim,atom_shape)
+        self.head_edge = head_edge(dim,edge_shape)
+        
+    def forward(self, data,IsTrain=False,typeTrain=False,weight=0.1):
+        out = self.lin_node(data.x)
+        # edge_*3 only does not repeat for undirected graph. Hence need to add (j,i) to (i,j) in edges
+        edge_index3 = torch.cat([data.edge_index3,data.edge_index3[[1,0]]],1)
+        n = data.edge_attr3.shape[0]
+        temp_ = self.edge2(torch.cat([data.edge_attr3,data.edge_attr4],1))
+        edge_attr3 = torch.cat([temp_,temp_],0)
+        
+        edge_attr = self.edge1(data.edge_attr)
+        for conv in self.conv1:
+            out,edge_attr = conv(out,data.edge_index,edge_attr)
+        
+        for conv in self.conv2:
+            out,edge_attr3 = conv(out,edge_index3,edge_attr3)    
+        
+        edge_attr3 = edge_attr3[:n]
+        if typeTrain:
+            if IsTrain:
+                y = data.y[data.type_attr]
+            edge_attr3 = edge_attr3[data.type_attr]
+            edge_index3 = data.edge_index3[:,data.type_attr]
+            edge_attr3_old = data.edge_attr3[data.type_attr]
+        else:
+            if IsTrain:
+                y = data.y
+            edge_index3 = data.edge_index3
+            edge_attr3_old = data.edge_attr3
+            
+        yhat = self.head(out,edge_index3,edge_attr3)
+        
+        if IsTrain:
+            y_mol = self.head_mol(out,data.batch)
+            y_atom = self.head_atom(out)
+            y_edge = self.head_edge(edge_attr3)
+            loss_other = weight * (torch.mean(torch.abs(data.y_mol - y_mol)) + \
+                                   torch.mean(torch.abs(data.y_atom - y_atom)) + \
+                                   torch.mean(torch.abs(data.y_coupling - y_edge)))
+            
+            k = torch.sum(edge_attr3_old,0)
+            nonzeroIndex = torch.nonzero(k).squeeze(1)
+            abs_ = torch.abs(y-yhat).unsqueeze(1)
+            loss_perType = torch.zeros(8,device='cuda:0')
+            loss_perType[nonzeroIndex] = torch.log(torch.sum(abs_ * edge_attr3_old[:,nonzeroIndex],0)/k[nonzeroIndex])
+            loss = torch.sum(loss_perType)/nonzeroIndex.shape[0]
+            return loss+loss_other,loss_perType
+        else:
+            return yhat
+        
 '''------------------------------------------------------------------------------------------------------------------'''
 '''----------------------------------------------------- utility -----------------------------------------------------'''
 '''------------------------------------------------------------------------------------------------------------------'''
