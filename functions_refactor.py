@@ -28,6 +28,7 @@ import pandas as pd
 import copy
 import sys
 import inspect
+
 '''------------------------------------------------------------------------------------------------------------------'''
 '''------------------------------------------------------ Data ------------------------------------------------------'''
 '''------------------------------------------------------------------------------------------------------------------'''
@@ -220,6 +221,22 @@ class swapHead_type(torch.nn.Module):
         temp = x[edge_index3] # (2,N,d)
         yhat = torch.cat([torch.cat([temp[0],temp[1]],1),torch.cat([temp[1],temp[0]],1)],0)
         yhat = self.linear(yhat).squeeze(1).reshape(2,-1).mean(0)
+        return yhat
+    
+class SimpleHead_type(torch.nn.Module):
+    def __init__(self,dim,edge_in3,edge_in4):
+        cat_factor = 2
+        super(SimpleHead_type, self).__init__()
+        self.linear = Sequential(#BatchNorm1d(dim*cat_factor),
+                                 Linear(dim*cat_factor,dim*cat_factor*2),
+                                 ReLU(inplace=True),
+                                 #BatchNorm1d(dim*cat_factor*2),
+                                 Linear(dim*cat_factor*2,1))
+        
+    def forward(self,x,edge_index3,edge_attr3,edge_attr4,batch):
+        temp = x[edge_index3] # (2,N,d)
+        yhat = torch.cat([temp[0],temp[1]],1)
+        yhat = self.linear(yhat).squeeze(1)
         return yhat
     
 class cat3HeadPool_type(torch.nn.Module):
