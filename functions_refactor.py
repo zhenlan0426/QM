@@ -735,7 +735,7 @@ class GNN_multiHead(torch.nn.Module):
         self.head_atom = head_atom(dim,atom_shape)
         self.head_edge = head_edge(dim,edge_shape)
         
-    def forward(self, data,IsTrain=False,typeTrain=False,logLoss=True,weight=0.1):
+    def forward(self, data,IsTrain=False,typeTrain=False,logLoss=True,weight=None):
         out = self.lin_node(data.x)
         # edge_*3 only does not repeat for undirected graph. Hence need to add (j,i) to (i,j) in edges
         edge_index3 = torch.cat([data.edge_index3,data.edge_index3[[1,0]]],1)
@@ -766,13 +766,16 @@ class GNN_multiHead(torch.nn.Module):
         yhat = self.head(out,edge_index3,edge_attr3)
         
         if IsTrain:
-            y_mol = self.head_mol(out,data.batch)
-            y_atom = self.head_atom(out)
-            y_edge = self.head_edge(edge_attr3)
-            loss_other = weight * (torch.mean(torch.abs(data.y_mol - y_mol)) + \
-                                   torch.mean(torch.abs(data.y_atom - y_atom)) + \
-                                   torch.mean(torch.abs(data.y_coupling - y_edge)))
-            
+            if weight is None:
+                loss_other = 0
+            else:
+                y_mol = self.head_mol(out,data.batch)
+                y_atom = self.head_atom(out)
+                y_edge = self.head_edge(edge_attr3)
+                loss_other = weight * (torch.mean(torch.abs(data.y_mol - y_mol)) + \
+                                       torch.mean(torch.abs(data.y_atom - y_atom)) + \
+                                       torch.mean(torch.abs(data.y_coupling - y_edge)))
+
             k = torch.sum(edge_attr3_old,0)
             nonzeroIndex = torch.nonzero(k).squeeze(1)
             abs_ = torch.abs(y-yhat).unsqueeze(1)
@@ -997,7 +1000,8 @@ def train_type(opt,model,epochs,train_dl,val_dl,paras,clip,typeTrain=False,train
     return model,train_loss_list,val_loss_list,bestWeight
 
 
-def train_type_earlyStop(opt,model,epochs,train_dl,val_dl,paras,clip,typeTrain=False,train_loss_list=None,val_loss_list=None,scheduler=None,logLoss=True,weight=0.1):
+def train_type_earlyStop(opt,model,epochs,train_dl,val_dl,paras,clip,typeTrain=False,\
+                         train_loss_list=None,val_loss_list=None,scheduler=None,logLoss=True,weight=None,threshold=0):
     # add early stop and weight for hyper Search
     since = time.time()
     
@@ -1021,7 +1025,7 @@ def train_type_earlyStop(opt,model,epochs,train_dl,val_dl,paras,clip,typeTrain=F
         
         for i,data in enumerate(train_dl):
             data = data.to('cuda:0')
-            loss,loss_perType = model(data,True,typeTrain,logLoss)
+            loss,loss_perType = model(data,True,typeTrain,logLoss,weight)
             loss.backward()
             clip_grad_value_(paras,clip)
             opt.step()
@@ -1034,9 +1038,15 @@ def train_type_earlyStop(opt,model,epochs,train_dl,val_dl,paras,clip,typeTrain=F
         with torch.no_grad():
             for j,data in enumerate(val_dl):
                 data = data.to('cuda:0')
-                loss,loss_perType = model(data,True,typeTrain)
+                loss,loss_perType = model(data,True,typeTrain,True,None)
                 val_loss += loss.item()
                 val_loss_perType += loss_perType.cpu().detach().numpy()
+        
+        # early stop
+        val_loss = val_loss/j
+        if (epoch==20) and (val_loss>threshold):
+            print('\nEarly Stop\n')
+            return None,None,None,None
         
         # save model
         val_loss_perType = val_loss_perType/j
@@ -1045,18 +1055,18 @@ def train_type_earlyStop(opt,model,epochs,train_dl,val_dl,paras,clip,typeTrain=F
                 lossBest[index_] = val_loss_perType[index_]
                 bestWeight[index_] = copy.deepcopy(model.state_dict())
             
-        print('epoch:{}, train_loss: {:+.3f}, val_loss: {:+.3f}, \ntrain_vector: {}, \nval_vector  : {}\n'.format(epoch+epoch0,train_loss/i,val_loss/j,\
+        print('epoch:{}, train_loss: {:+.3f}, val_loss: {:+.3f}, \ntrain_vector: {}, \nval_vector  : {}\n'.format(epoch+epoch0,train_loss/i,val_loss,\
                                                             '|'.join(['%+.2f'%i for i in train_loss_perType/i]),\
                                                             '|'.join(['%+.2f'%i for i in val_loss_perType])))
         train_loss_list.append(train_loss_perType/i)
         val_loss_list.append(val_loss_perType)
         if scheduler is not None:
-            scheduler.step(val_loss/j)
+            scheduler.step(val_loss)
             
     time_elapsed = time.time() - since
     print('Training completed in {}s'.format(time_elapsed))
-    
     return model,train_loss_list,val_loss_list,bestWeight
+
     
 def save_results(train_loss_perType,val_loss_perType,reuse,block,head,data,batch_size,dim,clip,layer1,layer2,factor,epochs,postStr='base'):
     epochs = len(train_loss_perType)
@@ -1070,6 +1080,16 @@ def save_results(train_loss_perType,val_loss_perType,reuse,block,head,data,batch
                                 for i in [reuse,block,head,data,batch_size,dim,clip,\
                                           layer1,layer2,factor,epochs,postStr]])),\
               index=False)    
+
+def save_results2(train_loss_perType,val_loss_perType,*nameList):
+    epochs = len(train_loss_perType)
+    results = pd.DataFrame([nameList for _ in range(epochs)],dtype=str)
+    temp = pd.DataFrame(np.concatenate([np.arange(epochs,dtype=np.int)[:,np.newaxis],np.stack(train_loss_perType,0),np.stack(val_loss_perType,0)],1),
+             columns=['epochs']+['train_type_{}'.format(i) for i in range(8)] + ['val_type_{}'.format(i) for i in range(8)])
+    results = pd.concat([results,temp],1)
+    results.to_csv('../Data/results_{}.csv'.\
+               format('_'.join([str(i).split('}')[1] if '}' in str(i) else str(i) \
+                                for i in nameList])),index=False)    
     
 def save_model(model,opt,reuse,block,head,data,batch_size,dim,clip,layer1,layer2,factor,epochs,postStr='base'):
     torch.save({'model_state_dict': model.state_dict(),
@@ -1089,6 +1109,14 @@ def save_model_type(bestWeight,opt,reuse,block,head,data,batch_size,dim,clip,lay
                 }, '../Model/{}.tar'.format('_'.join([str(i).split('}')[1] if '}' in str(i) else str(i) \
                                         for i in [reuse,block,head,data,batch_size,dim,clip,\
                                               layer1,layer2,factor,epochs,'type_'+str(i)+postStr]])))    
+
+def save_model_type2(bestWeight,opt,*nameList):
+    opt_state = opt.state_dict()
+    for j,w in enumerate(bestWeight):
+        torch.save({'model_state_dict': w,
+                'optimizer_state_dict': opt_state,
+                }, '../Model/{}.tar'.format('_'.join([str(i).split('}')[1] if '}' in str(i) else str(i) \
+                                        for i in nameList+['type_'+str(j)] ])))  
     
 def make_submission(reuse,block,head,data,batch_size,dim,clip,layer1,layer2,factor,epochs,postStr='base'):
     # set up
