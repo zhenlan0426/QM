@@ -37,7 +37,9 @@ data_dict = {'../Data/{}_data_ACSF.pickle':{'node_in':89,'edge_in':19,'edge_in4'
              '../Data/{}_data_ACSF_expand_PCA.pickle':{'node_in':32,'edge_in':19+25,'edge_in4':1+25},\
              '../Data/{}_data_SOAP_expand_PCA.pickle':{'node_in':48,'edge_in':19+25,'edge_in4':1+25},\
              '../Data/{}_data_atomInfo.pickle':{'node_in':19,'edge_in':19+25,'edge_in4':1+25},\
-             '../Data/{}_data_ACSF_expand_PCA_otherInfo.pickle':{'node_in':32,'edge_in':19+25,'edge_in4':1+25}}
+             '../Data/{}_data_ACSF_expand_PCA_otherInfo.pickle':{'node_in':32,'edge_in':19+25,'edge_in4':1+25},\
+             '../Data/{}_data_SOAP_expand_PCA_otherInfo.pickle':{'node_in':48,'edge_in':19+25,'edge_in4':1+25},\
+             '../Data/{}_data_atomInfo_otherInfo.pickle':{'node_in':19,'edge_in':19+25,'edge_in4':1+25}}
 
 columns = ['reuse',
 		   'block',
@@ -1116,7 +1118,7 @@ def save_model_type2(bestWeight,opt,*nameList):
         torch.save({'model_state_dict': w,
                 'optimizer_state_dict': opt_state,
                 }, '../Model/{}.tar'.format('_'.join([str(i).split('}')[1] if '}' in str(i) else str(i) \
-                                        for i in nameList+['type_'+str(j)] ])))  
+                                        for i in list(nameList)+['type_'+str(j)] ])))  
     
 def make_submission(reuse,block,head,data,batch_size,dim,clip,layer1,layer2,factor,epochs,postStr='base'):
     # set up
