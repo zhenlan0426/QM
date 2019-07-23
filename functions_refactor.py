@@ -735,7 +735,7 @@ class GNN_multiHead(torch.nn.Module):
         self.head_atom = head_atom(dim,atom_shape)
         self.head_edge = head_edge(dim,edge_shape)
         
-    def forward(self, data,IsTrain=False,typeTrain=False,weight=0.1):
+    def forward(self, data,IsTrain=False,typeTrain=False,logLoss=True,weight=0.1):
         out = self.lin_node(data.x)
         # edge_*3 only does not repeat for undirected graph. Hence need to add (j,i) to (i,j) in edges
         edge_index3 = torch.cat([data.edge_index3,data.edge_index3[[1,0]]],1)
@@ -777,9 +777,15 @@ class GNN_multiHead(torch.nn.Module):
             nonzeroIndex = torch.nonzero(k).squeeze(1)
             abs_ = torch.abs(y-yhat).unsqueeze(1)
             loss_perType = torch.zeros(8,device='cuda:0')
-            loss_perType[nonzeroIndex] = torch.log(torch.sum(abs_ * edge_attr3_old[:,nonzeroIndex],0)/k[nonzeroIndex])
-            loss = torch.sum(loss_perType)/nonzeroIndex.shape[0]
-            return loss+loss_other,loss_perType
+            if logLoss:
+                loss_perType[nonzeroIndex] = torch.log(torch.sum(abs_ * edge_attr3_old[:,nonzeroIndex],0)/k[nonzeroIndex])
+                loss = torch.sum(loss_perType)/nonzeroIndex.shape[0]
+                return loss+loss_other,loss_perType         
+            else:
+                loss_perType[nonzeroIndex] = torch.sum(abs_ * edge_attr3_old[:,nonzeroIndex],0)/k[nonzeroIndex]
+                loss = torch.sum(loss_perType)/nonzeroIndex.shape[0]
+                loss_perType[nonzeroIndex] = torch.log(loss_perType[nonzeroIndex])
+                return loss+loss_other,loss_perType
         else:
             return yhat
         
@@ -861,7 +867,74 @@ def train(opt,model,epochs,train_dl,val_dl,paras,clip,typeTrain=False,train_loss
     checkpoint = torch.load('../Model/tmp.tar')
     model.load_state_dict(checkpoint['model_state_dict'])
     return model,train_loss_list,val_loss_list
+
+def train_earlyStop(opt,model,epochs,train_dl,val_dl,paras,clip,typeTrain=False,train_loss_list=None,val_loss_list=None,scheduler=None,threshold=0):
+    since = time.time()
     
+    lossBest = 1e6
+    if train_loss_list is None:
+        train_loss_list,val_loss_list = [],[]
+        epoch0 = 0
+    else:
+        epoch0 = len(train_loss_list)
+        
+    opt.zero_grad()
+    for epoch in range(epochs):
+        # training #
+        model.train()
+        np.random.seed()
+        train_loss = 0
+        train_loss_perType = np.zeros(8)
+        val_loss = 0
+        val_loss_perType = np.zeros(8)
+        
+        for i,data in enumerate(train_dl):
+            data = data.to('cuda:0')
+            loss,loss_perType = model(data,True,typeTrain)
+            loss.backward()
+            clip_grad_value_(paras,clip)
+            opt.step()
+            opt.zero_grad()
+            train_loss += loss.item()
+            train_loss_perType += loss_perType.cpu().detach().numpy()
+            
+        # evaluating #
+        model.eval()
+        with torch.no_grad():
+            for j,data in enumerate(val_dl):
+                data = data.to('cuda:0')
+                loss,loss_perType = model(data,True,typeTrain)
+                val_loss += loss.item()
+                val_loss_perType += loss_perType.cpu().detach().numpy()
+        
+        
+        val_loss = val_loss/j
+        # early stop
+        if (epoch==15) and (val_loss>threshold):
+            print('\nEarly Stop\n')
+            return None,None,None
+        
+        # save model
+        if val_loss<lossBest:
+            lossBest = val_loss
+            torch.save({'model_state_dict': model.state_dict()},'../Model/tmp.tar')
+            
+        print('epoch:{}, train_loss: {:+.3f}, val_loss: {:+.3f}, \ntrain_vector: {}, \nval_vector  : {}\n'.format(epoch+epoch0,train_loss/i,val_loss,\
+                                                            '|'.join(['%+.2f'%i for i in train_loss_perType/i]),\
+                                                            '|'.join(['%+.2f'%i for i in val_loss_perType/j])))
+        train_loss_list.append(train_loss_perType/i)
+        val_loss_list.append(val_loss_perType/j)
+        if scheduler is not None:
+            scheduler.step(val_loss)
+        
+    time_elapsed = time.time() - since
+    print('Training completed in {}s'.format(time_elapsed))
+    
+    # load best model
+    checkpoint = torch.load('../Model/tmp.tar')
+    model.load_state_dict(checkpoint['model_state_dict'])
+    return model,train_loss_list,val_loss_list
+
 def train_type(opt,model,epochs,train_dl,val_dl,paras,clip,typeTrain=False,train_loss_list=None,val_loss_list=None,scheduler=None,logLoss=True):
     # for MEGNet
     since = time.time()
@@ -923,6 +996,67 @@ def train_type(opt,model,epochs,train_dl,val_dl,paras,clip,typeTrain=False,train
     
     return model,train_loss_list,val_loss_list,bestWeight
 
+
+def train_type_earlyStop(opt,model,epochs,train_dl,val_dl,paras,clip,typeTrain=False,train_loss_list=None,val_loss_list=None,scheduler=None,logLoss=True,weight=0.1):
+    # add early stop and weight for hyper Search
+    since = time.time()
+    
+    lossBest = [1e6] * 8
+    bestWeight = [None] * 8
+    if train_loss_list is None:
+        train_loss_list,val_loss_list = [],[]
+        epoch0 = 0
+    else:
+        epoch0 = len(train_loss_list)
+        
+    opt.zero_grad()
+    for epoch in range(epochs):
+        # training #
+        model.train()
+        np.random.seed()
+        train_loss = 0
+        train_loss_perType = np.zeros(8)
+        val_loss = 0
+        val_loss_perType = np.zeros(8)
+        
+        for i,data in enumerate(train_dl):
+            data = data.to('cuda:0')
+            loss,loss_perType = model(data,True,typeTrain,logLoss)
+            loss.backward()
+            clip_grad_value_(paras,clip)
+            opt.step()
+            opt.zero_grad()
+            train_loss += loss.item()
+            train_loss_perType += loss_perType.cpu().detach().numpy()
+            
+        # evaluating #
+        model.eval()
+        with torch.no_grad():
+            for j,data in enumerate(val_dl):
+                data = data.to('cuda:0')
+                loss,loss_perType = model(data,True,typeTrain)
+                val_loss += loss.item()
+                val_loss_perType += loss_perType.cpu().detach().numpy()
+        
+        # save model
+        val_loss_perType = val_loss_perType/j
+        for index_ in range(8):
+            if val_loss_perType[index_]<lossBest[index_]:
+                lossBest[index_] = val_loss_perType[index_]
+                bestWeight[index_] = copy.deepcopy(model.state_dict())
+            
+        print('epoch:{}, train_loss: {:+.3f}, val_loss: {:+.3f}, \ntrain_vector: {}, \nval_vector  : {}\n'.format(epoch+epoch0,train_loss/i,val_loss/j,\
+                                                            '|'.join(['%+.2f'%i for i in train_loss_perType/i]),\
+                                                            '|'.join(['%+.2f'%i for i in val_loss_perType])))
+        train_loss_list.append(train_loss_perType/i)
+        val_loss_list.append(val_loss_perType)
+        if scheduler is not None:
+            scheduler.step(val_loss/j)
+            
+    time_elapsed = time.time() - since
+    print('Training completed in {}s'.format(time_elapsed))
+    
+    return model,train_loss_list,val_loss_list,bestWeight
     
 def save_results(train_loss_perType,val_loss_perType,reuse,block,head,data,batch_size,dim,clip,layer1,layer2,factor,epochs,postStr='base'):
     epochs = len(train_loss_perType)
