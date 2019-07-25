@@ -948,7 +948,7 @@ def train(opt,model,epochs,train_dl,val_dl,paras,clip,typeTrain=False,train_loss
         val_loss = val_loss/j
         if val_loss<lossBest:
             lossBest = val_loss
-            torch.save({'model_state_dict': model.state_dict()},'../Model/tmp.tar')
+            bestWeight = copy.deepcopy(model.state_dict())
             
         print('epoch:{}, train_loss: {:+.3f}, val_loss: {:+.3f}, \ntrain_vector: {}, \nval_vector  : {}\n'.format(epoch+epoch0,train_loss/i,val_loss,\
                                                             '|'.join(['%+.2f'%i for i in train_loss_perType/i]),\
@@ -962,8 +962,7 @@ def train(opt,model,epochs,train_dl,val_dl,paras,clip,typeTrain=False,train_loss
     print('Training completed in {}s'.format(time_elapsed))
     
     # load best model
-    checkpoint = torch.load('../Model/tmp.tar')
-    model.load_state_dict(checkpoint['model_state_dict'])
+    model.load_state_dict(bestWeight)
     return model,train_loss_list,val_loss_list
 
 def train_earlyStop(opt,model,epochs,train_dl,val_dl,paras,clip,typeTrain=False,train_loss_list=None,val_loss_list=None,scheduler=None,threshold=0):
