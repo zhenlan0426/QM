@@ -485,12 +485,12 @@ class NNConv2(MessagePassing):
 
 class schnet_block(torch.nn.Module):
     # use both types of edges
-    def __init__(self,dim=64,edge_dim=12):
+    def __init__(self,dim=64,edge_dim=12,aggr='mean'):
         super(schnet_block, self).__init__()
         
         nn = Sequential(BatchNorm1d(edge_dim),Linear(edge_dim, dim*2),ReLU(), \
                         BatchNorm1d(dim*2),Linear(dim*2, dim))
-        self.conv = NNConv2(dim, dim, nn, aggr='mean', root_weight=False)
+        self.conv = NNConv2(dim, dim, nn, aggr=aggr, root_weight=False)
         self.lin_covert = Sequential(BatchNorm1d(dim),Linear(dim, dim*2),ReLU(), \
                                      BatchNorm1d(dim*2),Linear(dim*2, dim))
         
@@ -502,11 +502,11 @@ class schnet_block(torch.nn.Module):
 
 class NNConv_block(torch.nn.Module):
     # use both types of edges
-    def __init__(self,dim=64,edge_dim=12):
+    def __init__(self,dim=64,edge_dim=12,aggr='mean'):
         super(NNConv_block, self).__init__()
         
         nn = Sequential(BatchNorm1d(edge_dim),Linear(edge_dim, dim*dim))
-        self.conv = NNConv(dim, dim, nn, aggr='mean', root_weight=False)
+        self.conv = NNConv(dim, dim, nn, aggr=aggr, root_weight=False)
         self.gru = GRU(dim, dim)
         
     def forward(self, x, edge_index, edge_attr):
@@ -516,8 +516,8 @@ class NNConv_block(torch.nn.Module):
 
 
 class MEGNet(MessagePassing_edgeUpdate):
-    def __init__(self,dim):
-        super(MEGNet, self).__init__(aggr='mean')
+    def __init__(self,dim,aggr='mean'):
+        super(MEGNet, self).__init__(aggr=aggr)
         cat_factor = 2
         multiple_factor = 3
         self.dim = dim
@@ -549,7 +549,7 @@ class MEGNet(MessagePassing_edgeUpdate):
         return 'MEGNet'
 
 class MEGNet_block(torch.nn.Module):
-    def __init__(self,dim):
+    def __init__(self,dim,aggr='mean'):
         super(MEGNet_block, self).__init__()
         cat_factor = 1
         multiple_factor = 3        
@@ -563,7 +563,7 @@ class MEGNet_block(torch.nn.Module):
                                     BatchNorm1d(dim*cat_factor*multiple_factor),
                                     LeakyReLU(inplace=True),
                                     Linear(dim*cat_factor*multiple_factor,dim))        
-        self.conv = MEGNet(dim)
+        self.conv = MEGNet(dim,aggr=aggr)
     
     def forward(self, x, edge_index, edge_attr):
         x_new,edge_new = self.conv(x, edge_index, edge_attr)
@@ -584,7 +584,7 @@ class MEGNet_block(torch.nn.Module):
 class GNN(torch.nn.Module):
 
     def __init__(self,reuse,block,head,dim,layer1,layer2,factor,\
-                 node_in,edge_in,edge_in4,edge_in3=8):
+                 node_in,edge_in,edge_in4,edge_in3=8,aggr='mean'):
         # block,head are nn.Module
         # node_in,edge_in are dim for bonding and edge_in4,edge_in3 for coupling
         super(GNN, self).__init__()
@@ -592,11 +592,11 @@ class GNN(torch.nn.Module):
                                    BatchNorm1d(dim*factor),Linear(dim*factor, dim),ReLU())
         
         if reuse:
-            self.conv1 = nn.ModuleList([block(dim=dim,edge_dim=edge_in)] * layer1)
-            self.conv2 = nn.ModuleList([block(dim=dim,edge_dim=edge_in3+edge_in4)] * layer2)
+            self.conv1 = nn.ModuleList([block(dim=dim,edge_dim=edge_in,aggr=aggr)] * layer1)
+            self.conv2 = nn.ModuleList([block(dim=dim,edge_dim=edge_in3+edge_in4,aggr=aggr)] * layer2)
         else:
-            self.conv1 = nn.ModuleList([block(dim=dim,edge_dim=edge_in) for _ in range(layer1)])
-            self.conv2 = nn.ModuleList([block(dim=dim,edge_dim=edge_in3+edge_in4) for _ in range(layer2)])            
+            self.conv1 = nn.ModuleList([block(dim=dim,edge_dim=edge_in,aggr=aggr) for _ in range(layer1)])
+            self.conv2 = nn.ModuleList([block(dim=dim,edge_dim=edge_in3+edge_in4,aggr=aggr) for _ in range(layer2)])            
         
         self.head = head(dim,edge_in3,edge_in4)
         
@@ -642,7 +642,7 @@ class GNN(torch.nn.Module):
 class GNN_edgeUpdate(torch.nn.Module):
 
     def __init__(self,reuse,block,head,dim,layer1,layer2,factor,\
-                 node_in,edge_in,edge_in4,edge_in3=8):
+                 node_in,edge_in,edge_in4,edge_in3=8,aggr='mean'):
         # block,head are nn.Module
         # node_in,edge_in are dim for bonding and edge_in4,edge_in3 for coupling
         super(GNN_edgeUpdate, self).__init__()
@@ -655,11 +655,11 @@ class GNN_edgeUpdate(torch.nn.Module):
         self.edge2 = Sequential(BatchNorm1d(edge_in4+edge_in3),Linear(edge_in4+edge_in3, dim*factor),LeakyReLU(), \
                                    BatchNorm1d(dim*factor),Linear(dim*factor, dim),LeakyReLU())        
         if reuse:
-            self.conv1 = block(dim=dim)
-            self.conv2 = block(dim=dim)
+            self.conv1 = block(dim=dim,aggr=aggr)
+            self.conv2 = block(dim=dim,aggr=aggr)
         else:
-            self.conv1 = nn.ModuleList([block(dim=dim) for _ in range(layer1)])
-            self.conv2 = nn.ModuleList([block(dim=dim) for _ in range(layer2)])            
+            self.conv1 = nn.ModuleList([block(dim=dim,aggr=aggr) for _ in range(layer1)])
+            self.conv2 = nn.ModuleList([block(dim=dim,aggr=aggr) for _ in range(layer2)])            
         
         self.head = head(dim)
         
@@ -714,7 +714,7 @@ class GNN_edgeUpdate(torch.nn.Module):
 class GNN_multiHead(torch.nn.Module):
     # for MEGNet only
     def __init__(self,reuse,block,head,head_mol,head_atom,head_edge,dim,layer1,layer2,factor,\
-                 node_in,edge_in,edge_in4,edge_in3=8,mol_shape=4,atom_shape=10,edge_shape=4):
+                 node_in,edge_in,edge_in4,edge_in3=8,mol_shape=4,atom_shape=10,edge_shape=4,aggr='mean'):
         # block,head are nn.Module
         # node_in,edge_in are dim for bonding and edge_in4,edge_in3 for coupling
         super(GNN_multiHead, self).__init__()
@@ -727,11 +727,11 @@ class GNN_multiHead(torch.nn.Module):
         self.edge2 = Sequential(BatchNorm1d(edge_in4+edge_in3),Linear(edge_in4+edge_in3, dim*factor),LeakyReLU(), \
                                    BatchNorm1d(dim*factor),Linear(dim*factor, dim),LeakyReLU())        
         if reuse:
-            self.conv1 = block(dim=dim)
-            self.conv2 = block(dim=dim)
+            self.conv1 = block(dim=dim,aggr=aggr)
+            self.conv2 = block(dim=dim,aggr=aggr)
         else:
-            self.conv1 = nn.ModuleList([block(dim=dim) for _ in range(layer1)])
-            self.conv2 = nn.ModuleList([block(dim=dim) for _ in range(layer2)])            
+            self.conv1 = nn.ModuleList([block(dim=dim,aggr=aggr) for _ in range(layer1)])
+            self.conv2 = nn.ModuleList([block(dim=dim,aggr=aggr) for _ in range(layer2)])            
         
         self.head = head(dim)
         self.head_mol = head_mol(dim,mol_shape)
@@ -799,10 +799,13 @@ class GNN_multiHead(torch.nn.Module):
 class GNN_multiHead_interleave(torch.nn.Module):
     # for MEGNet only
     def __init__(self,reuse,block,head,head_mol,head_atom,head_edge,dim,layer1,layer2,factor,\
-                 node_in,edge_in,edge_in4,edge_in3=8,mol_shape=4,atom_shape=10,edge_shape=4):
+                 node_in,edge_in,edge_in4,edge_in3=8,mol_shape=4,atom_shape=10,edge_shape=4,aggr='mean',interleave=False):
         # block,head are nn.Module
         # node_in,edge_in are dim for bonding and edge_in4,edge_in3 for coupling
         super(GNN_multiHead_interleave, self).__init__()
+        if interleave:
+            assert len(layer1)==len(layer2),'layer1 needs to be the same as layer2'
+        self.interleave = interleave
         self.lin_node = Sequential(BatchNorm1d(node_in),Linear(node_in, dim*factor),LeakyReLU(), \
                                    BatchNorm1d(dim*factor),Linear(dim*factor, dim),LeakyReLU())
 
@@ -812,21 +815,19 @@ class GNN_multiHead_interleave(torch.nn.Module):
         self.edge2 = Sequential(BatchNorm1d(edge_in4+edge_in3),Linear(edge_in4+edge_in3, dim*factor),LeakyReLU(), \
                                    BatchNorm1d(dim*factor),Linear(dim*factor, dim),LeakyReLU())        
         if reuse:
-            self.conv1 = block(dim=dim)
-            self.conv2 = block(dim=dim)
+            self.conv1 = block(dim=dim,aggr=aggr)
+            self.conv2 = block(dim=dim,aggr=aggr)
         else:
-            self.conv1 = nn.ModuleList([block(dim=dim) for _ in range(layer1)])
-            self.conv2 = nn.ModuleList([block(dim=dim) for _ in range(layer2)])            
+            self.conv1 = nn.ModuleList([block(dim=dim,aggr=aggr) for _ in range(layer1)])
+            self.conv2 = nn.ModuleList([block(dim=dim,aggr=aggr) for _ in range(layer2)])            
         
         self.head = head(dim)
         self.head_mol = head_mol(dim,mol_shape)
         self.head_atom = head_atom(dim,atom_shape)
         self.head_edge = head_edge(dim,edge_shape)
         
-    def forward(self, data,IsTrain=False,typeTrain=False,logLoss=True,weight=None,interleave=True):
-        if interleave:
-            assert len(self.conv1)==len(self.conv2),'layer1 needs to be the same as layer2'
-            
+    def forward(self, data,IsTrain=False,typeTrain=False,logLoss=True,weight=None):
+
         out = self.lin_node(data.x)
         # edge_*3 only does not repeat for undirected graph. Hence need to add (j,i) to (i,j) in edges
         edge_index3 = torch.cat([data.edge_index3,data.edge_index3[[1,0]]],1)
@@ -836,7 +837,7 @@ class GNN_multiHead_interleave(torch.nn.Module):
         
         edge_attr = self.edge1(data.edge_attr)
         
-        if interleave:
+        if self.interleave:
             for conv1,conv2 in zip(self.conv1,self.conv2):
                 out,edge_attr = conv1(out,data.edge_index,edge_attr)
                 out,edge_attr3 = conv2(out,edge_index3,edge_attr3)
