@@ -38,9 +38,12 @@ data_dict = {'../Data/{}_data_ACSF.pickle':{'node_in':89,'edge_in':19,'edge_in4'
              '../Data/{}_data_ACSF_expand_PCA.pickle':{'node_in':32,'edge_in':19+25,'edge_in4':1+25},\
              '../Data/{}_data_SOAP_expand_PCA.pickle':{'node_in':48,'edge_in':19+25,'edge_in4':1+25},\
              '../Data/{}_data_atomInfo.pickle':{'node_in':19,'edge_in':19+25,'edge_in4':1+25},\
+             '../Data/{}_data_ACSF_SOAP_atomInfo.pickle':{'node_in':19+32+48,'edge_in':19+25,'edge_in4':1+25},\
+             
              '../Data/{}_data_ACSF_expand_PCA_otherInfo.pickle':{'node_in':32,'edge_in':19+25,'edge_in4':1+25},\
              '../Data/{}_data_SOAP_expand_PCA_otherInfo.pickle':{'node_in':48,'edge_in':19+25,'edge_in4':1+25},\
-             '../Data/{}_data_atomInfo_otherInfo.pickle':{'node_in':19,'edge_in':19+25,'edge_in4':1+25}}
+             '../Data/{}_data_atomInfo_otherInfo.pickle':{'node_in':19,'edge_in':19+25,'edge_in4':1+25},\
+             '../Data/{}_data_ACSF_SOAP_atomInfo_otherInfo.pickle':{'node_in':19+32+48,'edge_in':19+25,'edge_in4':1+25}}
 
 columns = ['reuse',
 		   'block',
@@ -584,10 +587,13 @@ class MEGNet_block(torch.nn.Module):
 class GNN(torch.nn.Module):
 
     def __init__(self,reuse,block,head,dim,layer1,layer2,factor,\
-                 node_in,edge_in,edge_in4,edge_in3=8,aggr='mean'):
+                 node_in,edge_in,edge_in4,edge_in3=8,aggr='mean',interleave=False):
         # block,head are nn.Module
         # node_in,edge_in are dim for bonding and edge_in4,edge_in3 for coupling
         super(GNN, self).__init__()
+        if interleave:
+            assert layer1==layer2,'layer1 needs to be the same as layer2'
+        self.interleave = interleave        
         self.lin_node = Sequential(BatchNorm1d(node_in),Linear(node_in, dim*factor),ReLU(), \
                                    BatchNorm1d(dim*factor),Linear(dim*factor, dim),ReLU())
         
@@ -607,11 +613,15 @@ class GNN(torch.nn.Module):
         temp_ = torch.cat([data.edge_attr3,data.edge_attr4],1) 
         edge_attr3 = torch.cat([temp_,temp_],0)
 
-        for conv in self.conv1:
-            out = conv(out,data.edge_index,data.edge_attr)
-
-        for conv in self.conv2:
-            out = conv(out,edge_index3,edge_attr3)    
+        if self.interleave:
+            for conv1,conv2 in zip(self.conv1,self.conv2):
+                out = conv1(out,data.edge_index,data.edge_attr)
+                out = conv2(out,edge_index3,edge_attr3)
+        else:
+            for conv in self.conv1:
+                out = conv(out,data.edge_index,data.edge_attr)
+            for conv in self.conv2:
+                out = conv(out,edge_index3,edge_attr3)
         
         if typeTrain:
             if IsTrain:
@@ -804,7 +814,7 @@ class GNN_multiHead_interleave(torch.nn.Module):
         # node_in,edge_in are dim for bonding and edge_in4,edge_in3 for coupling
         super(GNN_multiHead_interleave, self).__init__()
         if interleave:
-            assert len(layer1)==len(layer2),'layer1 needs to be the same as layer2'
+            assert layer1==layer2,'layer1 needs to be the same as layer2'
         self.interleave = interleave
         self.lin_node = Sequential(BatchNorm1d(node_in),Linear(node_in, dim*factor),LeakyReLU(), \
                                    BatchNorm1d(dim*factor),Linear(dim*factor, dim),LeakyReLU())
@@ -827,7 +837,6 @@ class GNN_multiHead_interleave(torch.nn.Module):
         self.head_edge = head_edge(dim,edge_shape)
         
     def forward(self, data,IsTrain=False,typeTrain=False,logLoss=True,weight=None):
-
         out = self.lin_node(data.x)
         # edge_*3 only does not repeat for undirected graph. Hence need to add (j,i) to (i,j) in edges
         edge_index3 = torch.cat([data.edge_index3,data.edge_index3[[1,0]]],1)
