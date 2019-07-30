@@ -5,7 +5,7 @@ Created on Thu Jul  4 08:47:11 2019
 
 @author: will
 """
-
+from apex import amp
 import torch
 import torch.nn.functional as F
 from torch.nn import Sequential, Linear, ReLU, GRU,BatchNorm1d,Dropout,LeakyReLU
@@ -1042,7 +1042,7 @@ def train_earlyStop(opt,model,epochs,train_dl,val_dl,paras,clip,typeTrain=False,
     model.load_state_dict(checkpoint['model_state_dict'])
     return model,train_loss_list,val_loss_list
 
-def train_type(opt,model,epochs,train_dl,val_dl,paras,clip,typeTrain=False,train_loss_list=None,val_loss_list=None,scheduler=None,logLoss=True):
+def train_type(opt,model,epochs,train_dl,val_dl,paras,clip,typeTrain=False,train_loss_list=None,val_loss_list=None,scheduler=None,logLoss=True,UseAmp=False,AMP_clip=False):
     # for MEGNet
     since = time.time()
     
@@ -1067,8 +1067,18 @@ def train_type(opt,model,epochs,train_dl,val_dl,paras,clip,typeTrain=False,train
         for i,data in enumerate(train_dl):
             data = data.to('cuda:0')
             loss,loss_perType = model(data,True,typeTrain,logLoss)
-            loss.backward()
-            clip_grad_value_(paras,clip)
+            
+            if UseAmp:
+                with amp.scale_loss(loss, opt) as scaled_loss:
+                    scaled_loss.backward()
+            else:
+                loss.backward()
+            
+            if AMP_clip:
+                clip_grad_value_(amp.master_params(opt), clip)
+            else:
+                clip_grad_value_(paras,clip)
+                
             opt.step()
             opt.zero_grad()
             train_loss += loss.item()
