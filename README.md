@@ -1,4 +1,2 @@
 # QM
-1. just-atom feature (morgon, MEGNet, QM9)
-2. acsf with better parameters
-3. wacsf
+https://medium.com/the-artificial-impostor/use-nvidia-apex-for-easy-mixed-precision-training-in-pytorch-46841c6eed8c
