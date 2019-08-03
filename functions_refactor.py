@@ -294,7 +294,18 @@ class head_mol(torch.nn.Module):
         out = self.set2set(out, batch)
         out = self.linear(out).squeeze(1)
         return out
-
+    
+class head_mol2(torch.nn.Module):
+    def __init__(self,dim,mol_shape):
+        factor = 2
+        super(head_mol2, self).__init__()
+        self.linear = Sequential(Linear(dim, dim*factor),ReLU(), \
+                                 Linear(dim*factor, mol_shape))
+        
+    def forward(self,u):
+        out = self.linear(u).squeeze(1)
+        return out
+    
 class head_atom(torch.nn.Module):
     def __init__(self,dim,atom_shape):
         factor = 2
@@ -631,21 +642,23 @@ class GNN(torch.nn.Module):
             edge_index3 = data.edge_index3[:,data.type_attr]
             edge_attr3 = data.edge_attr3[data.type_attr]
             edge_attr4 = data.edge_attr4[data.type_attr]
+            edge_attr3_old = data.edge_attr3[data.type_attr]
         else:
             if IsTrain:
                 y = data.y
             edge_index3 = data.edge_index3
             edge_attr3 = data.edge_attr3
             edge_attr4 = data.edge_attr4
+            edge_attr3_old = data.edge_attr3
             
         yhat = self.head(out,edge_index3,edge_attr3,edge_attr4,data.batch)
         
         if IsTrain:
-            k = torch.sum(edge_attr3,0)
+            k = torch.sum(edge_attr3_old,0)
             nonzeroIndex = torch.nonzero(k).squeeze(1)
             abs_ = torch.abs(y-yhat).unsqueeze(1)
             loss_perType = torch.zeros(8,device='cuda:0')
-            loss_perType[nonzeroIndex] = torch.log(torch.sum(abs_ * edge_attr3[:,nonzeroIndex],0)/k[nonzeroIndex])
+            loss_perType[nonzeroIndex] = torch.log(torch.sum(abs_ * edge_attr3_old[:,nonzeroIndex],0)/k[nonzeroIndex])
             loss = torch.sum(loss_perType)/nonzeroIndex.shape[0]
             return loss,loss_perType
         else:
@@ -1083,7 +1096,7 @@ class GNN_MataLayer(torch.nn.Module):
             if weight is None:
                 loss_other = 0
             else:
-                y_mol = self.head_mol(out,data.batch)
+                y_mol = self.head_mol(u)
                 y_atom = self.head_atom(out)
                 y_edge = self.head_edge(edge_attr3)
                 loss_other = weight * (torch.mean(torch.abs(data.y_mol - y_mol)) + \
