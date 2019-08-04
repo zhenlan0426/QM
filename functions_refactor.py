@@ -6,13 +6,14 @@ Created on Thu Jul  4 08:47:11 2019
 @author: will
 """
 from apex import amp
+import math
 import torch
 import torch.nn.functional as F
 from torch.nn import Sequential, Linear, ReLU, GRU,BatchNorm1d,Dropout,LeakyReLU
 from torch_geometric.nn import NNConv#,GATConv
 import torch.nn as nn
 from torch.nn.utils import clip_grad_value_
-
+from torch.nn import init
 from torch_scatter import scatter_add
 from torch_geometric.utils import softmax
 from torch.nn import Parameter
@@ -137,7 +138,7 @@ class InteractionNet(torch.nn.Module):
 class InteractionNet2(torch.nn.Module):
     def __init__(self,IntDim,xDimList,FunList):
         # None in FunList mean identity func
-        super(InteractionNet, self).__init__()
+        super(InteractionNet2, self).__init__()
         self.dimList = list(zip(xDimList[:-1],xDimList[1:]))
         tot_dim = sum([d0*d1+d1 for d0,d1 in self.dimList])
         self.linear = Linear(IntDim,tot_dim)
@@ -156,6 +157,42 @@ class InteractionNet2(torch.nn.Module):
                 x = torch.einsum('npq,np->nq',weight,x) + bias
         return x
 
+
+class SimplyInteraction(torch.nn.Module):
+    def __init__(self,xDim,factor=2,IntDim=8):
+        # None in FunList mean identity func
+        super(SimplyInteraction, self).__init__()
+        self.w0 = nn.Parameter(torch.Tensor(IntDim,xDim,xDim*factor))
+        self.b0 = nn.Parameter(torch.Tensor(IntDim,xDim*factor))
+        self.w1 = nn.Parameter(torch.Tensor(IntDim,xDim*factor,1))
+        self.b1 = nn.Parameter(torch.Tensor(IntDim,1))
+        self.reset_parameters()
+        
+    def reset_parameters(self):
+        init.kaiming_uniform_(self.w0)
+        init.kaiming_uniform_(self.w1)
+        
+        fan_in = self.w0.size(2)
+        bound = 1 / math.sqrt(fan_in)
+        init.uniform_(self.b0, -bound, bound)
+        fan_in = self.w1.size(2)
+        bound = 1 / math.sqrt(fan_in)
+        init.uniform_(self.b1, -bound, bound)
+        
+    def forward(self,x,edge_index3,edge_attr3,edge_attr3_old):
+        out = F.relu(torch.einsum('np,dpq->ndq',edge_attr3,self.w0) + self.b0)
+        out = torch.einsum('ndp,dpq->ndq',out,self.w1) + self.b1
+        out = out.squeeze(2)
+        return out[edge_attr3_old.to(torch.bool)]
+    
+def kaiming_uniform_(tensor, a=0, mode='fan_in', nonlinearity='relu'):
+    fan = init._calculate_correct_fan(tensor[0], mode)
+    gain = init.calculate_gain(nonlinearity, a)
+    std = gain / math.sqrt(fan)
+    bound = math.sqrt(3.0) * std  # Calculate uniform bounds from standard deviation
+    with torch.no_grad():
+        return tensor.uniform_(-bound, bound)
+    
 class cat3Head(torch.nn.Module):
     def __init__(self,dim,edge_in3,edge_in4):
         cat_factor = 3
@@ -197,7 +234,7 @@ class feedforwardHead_Update(torch.nn.Module):
         self.linear = Sequential(Linear(dim, dim*factor),ReLU(), \
                                  Linear(dim*factor, 1))
         
-    def forward(self,x,edge_index3,edge_attr3):
+    def forward(self,x,edge_index3,edge_attr3,edge_attr3_old):
         yhat = self.linear(edge_attr3).squeeze(1)
         return yhat
 
@@ -209,7 +246,7 @@ class feedforwardCombineHead_Update(torch.nn.Module):
         self.linear = Sequential(Dropout(0.33),Linear(dim*cat_factor, dim*cat_factor*factor),ReLU(), \
                                  Dropout(0.33),Linear(dim*cat_factor*factor, 1))
         
-    def forward(self,x,edge_index3,edge_attr3):
+    def forward(self,x,edge_index3,edge_attr3,edge_attr3_old):
         temp = x[edge_index3] # (2,N,d)
         yhat = torch.cat([temp.mean(0),temp[0]*temp[1],(temp[0]-temp[1])**2,edge_attr3],1)
         yhat = self.linear(yhat).squeeze(1)
@@ -716,7 +753,7 @@ class GNN_edgeUpdate(torch.nn.Module):
             edge_index3 = data.edge_index3
             edge_attr3_old = data.edge_attr3
             
-        yhat = self.head(out,edge_index3,edge_attr3)
+        yhat = self.head(out,edge_index3,edge_attr3,edge_attr3_old)
         
         if IsTrain:
             k = torch.sum(edge_attr3_old,0)
@@ -791,7 +828,7 @@ class GNN_multiHead(torch.nn.Module):
             edge_index3 = data.edge_index3
             edge_attr3_old = data.edge_attr3
             
-        yhat = self.head(out,edge_index3,edge_attr3)
+        yhat = self.head(out,edge_index3,edge_attr3,edge_attr3_old)
         
         if IsTrain:
             if weight is None:
@@ -884,7 +921,7 @@ class GNN_multiHead_interleave(torch.nn.Module):
             edge_index3 = data.edge_index3
             edge_attr3_old = data.edge_attr3
             
-        yhat = self.head(out,edge_index3,edge_attr3)
+        yhat = self.head(out,edge_index3,edge_attr3,edge_attr3_old)
         
         if IsTrain:
             if weight is None:
@@ -1090,7 +1127,7 @@ class GNN_MataLayer(torch.nn.Module):
             edge_index3 = data.edge_index3
             edge_attr3_old = data.edge_attr3
             
-        yhat = self.head(out,edge_index3,edge_attr3)
+        yhat = self.head(out,edge_index3,edge_attr3,edge_attr3_old)
         
         if IsTrain:
             if weight is None:
@@ -1375,6 +1412,7 @@ def train_type(opt,model,epochs,train_dl,val_dl,paras,clip,typeTrain=False,train
 def train_type_earlyStop(opt,model,epochs,train_dl,val_dl,paras,clip,typeTrain=False,\
                          train_loss_list=None,val_loss_list=None,scheduler=None,logLoss=True,weight=None,threshold=0):
     # add early stop and weight for hyper Search
+    # add early stop if nan for hyper3
     since = time.time()
     
     lossBest = [1e6] * 8
@@ -1417,7 +1455,12 @@ def train_type_earlyStop(opt,model,epochs,train_dl,val_dl,paras,clip,typeTrain=F
         # early stop
         val_loss = val_loss/j
         if (epoch==20) and (val_loss>threshold):
-            print('\nEarly Stop\n')
+            print('-----stop due to poor performance-----')
+            return None,None,None,None
+        
+        # check nan
+        if np.any(np.isnan(val_loss_perType)):
+            print('-----stop due to nan-----')
             return None,None,None,None
         
         # save model
@@ -1439,6 +1482,75 @@ def train_type_earlyStop(opt,model,epochs,train_dl,val_dl,paras,clip,typeTrain=F
     print('Training completed in {}s'.format(time_elapsed))
     return model,train_loss_list,val_loss_list,bestWeight
 
+def train_type_earlyStop_5fold(opt,model,epochs,train_dl,val_dl,paras,clip,typeTrain=False,\
+                         train_loss_list=None,val_loss_list=None,scheduler=None,logLoss=True,weight=None,patience=6):
+    # add early stop for 5 fold
+    since = time.time()
+    counter = 0 
+    lossBest = np.ones(8)*1e6
+    bestWeight = [None] * 8
+    if train_loss_list is None:
+        train_loss_list,val_loss_list = [],[]
+        epoch0 = 0
+    else:
+        epoch0 = len(train_loss_list)
+        
+    opt.zero_grad()
+    for epoch in range(epochs):
+        # training #
+        model.train()
+        np.random.seed()
+        train_loss = 0
+        train_loss_perType = np.zeros(8)
+        val_loss = 0
+        val_loss_perType = np.zeros(8)
+        
+        for i,data in enumerate(train_dl):
+            data = data.to('cuda:0')
+            loss,loss_perType = model(data,True,typeTrain,logLoss,weight)
+            loss.backward()
+            clip_grad_value_(paras,clip)
+            opt.step()
+            opt.zero_grad()
+            train_loss += loss.item()
+            train_loss_perType += loss_perType.cpu().detach().numpy()
+            
+        # evaluating #
+        model.eval()
+        with torch.no_grad():
+            for j,data in enumerate(val_dl):
+                data = data.to('cuda:0')
+                loss,loss_perType = model(data,True,typeTrain,True,None)
+                val_loss += loss.item()
+                val_loss_perType += loss_perType.cpu().detach().numpy()
+        
+        # save model
+        val_loss_perType = val_loss_perType/j
+        for index_ in range(8):
+            if val_loss_perType[index_]<lossBest[index_]:
+                lossBest[index_] = val_loss_perType[index_]
+                bestWeight[index_] = copy.deepcopy(model.state_dict())
+                
+        print('epoch:{}, train_loss: {:+.3f}, val_loss: {:+.3f}, \ntrain_vector: {}, \nval_vector  : {}\n'.format(epoch+epoch0,train_loss/i,val_loss,\
+                                                            '|'.join(['%+.2f'%i for i in train_loss_perType/i]),\
+                                                            '|'.join(['%+.2f'%i for i in val_loss_perType])))
+        train_loss_list.append(train_loss_perType/i)
+        val_loss_list.append(val_loss_perType)
+        if scheduler is not None:
+            scheduler.step(val_loss)
+                
+        # early stop
+        if np.any(val_loss_perType<lossBest):
+            counter = 0
+        else:
+            counter+= 1
+            if counter >= patience:
+                print('----early stop at epoch {}----'.format(epoch))
+                return model,train_loss_list,val_loss_list,bestWeight
+            
+    time_elapsed = time.time() - since
+    print('Training completed in {}s'.format(time_elapsed))
+    return model,train_loss_list,val_loss_list,bestWeight
     
 def save_results(train_loss_perType,val_loss_perType,reuse,block,head,data,batch_size,dim,clip,layer1,layer2,factor,epochs,postStr='base'):
     epochs = len(train_loss_perType)
