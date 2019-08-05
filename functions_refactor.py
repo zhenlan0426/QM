@@ -1523,6 +1523,7 @@ def train_type_earlyStop_5fold(opt,model,epochs,train_dl,val_dl,paras,clip,typeT
                 loss,loss_perType = model(data,True,typeTrain,True,None)
                 val_loss += loss.item()
                 val_loss_perType += loss_perType.cpu().detach().numpy()
+        val_loss = val_loss/j
         
         # save model
         val_loss_perType = val_loss_perType/j
@@ -1540,7 +1541,7 @@ def train_type_earlyStop_5fold(opt,model,epochs,train_dl,val_dl,paras,clip,typeT
             scheduler.step(val_loss)
                 
         # early stop
-        if np.any(val_loss_perType<lossBest):
+        if np.any(val_loss_perType==lossBest):
             counter = 0
         else:
             counter+= 1
