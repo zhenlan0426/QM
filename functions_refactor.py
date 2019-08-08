@@ -1552,6 +1552,88 @@ def train_type_earlyStop_5fold(opt,model,epochs,train_dl,val_dl,paras,clip,typeT
     time_elapsed = time.time() - since
     print('Training completed in {}s'.format(time_elapsed))
     return model,train_loss_list,val_loss_list,bestWeight
+
+def train_type_earlyStop_5fold_pseudoLabel(opt,model,epochs,train_dl,val_dl,paras,clip,typeTrain=False,\
+                         train_loss_list=None,val_loss_list=None,scheduler=None,logLoss=True,weight=None,patience=8,test_dl=None,freq=3):
+    # add early stop for 5 fold
+    # add pseudoLabel
+    # test_dl should set shuffle to True
+    since = time.time()
+    counter = 0 
+    lossBest = np.ones(8)*1e6
+    bestWeight = [None] * 8
+    if train_loss_list is None:
+        train_loss_list,val_loss_list = [],[]
+        epoch0 = 0
+    else:
+        epoch0 = len(train_loss_list)
+        
+    opt.zero_grad()
+    for epoch in range(epochs):
+        # training #
+        model.train()
+        np.random.seed()
+        train_loss = 0
+        train_loss_perType = np.zeros(8)
+        val_loss = 0
+        val_loss_perType = np.zeros(8)
+        
+        for i,data in enumerate(train_dl):
+            data = data.to('cuda:0')
+            loss,loss_perType = model(data,True,typeTrain,logLoss,weight)
+            loss.backward()
+            clip_grad_value_(paras,clip)
+            opt.step()
+            opt.zero_grad()
+            train_loss += loss.item()
+            train_loss_perType += loss_perType.cpu().detach().numpy()
+            
+            # train on pseudoLabel
+            if i%freq==0:
+                data = next(iter(test_dl)).to('cuda:0')
+                loss,_ = model(data,True,typeTrain,logLoss,None)
+                loss.backward()
+                clip_grad_value_(paras,clip)
+                opt.step()
+                opt.zero_grad()                
+            
+        # evaluating #
+        model.eval()
+        with torch.no_grad():
+            for j,data in enumerate(val_dl):
+                data = data.to('cuda:0')
+                loss,loss_perType = model(data,True,typeTrain,True,None)
+                val_loss += loss.item()
+                val_loss_perType += loss_perType.cpu().detach().numpy()
+        val_loss = val_loss/j
+        
+        # save model
+        val_loss_perType = val_loss_perType/j
+        for index_ in range(8):
+            if val_loss_perType[index_]<lossBest[index_]:
+                lossBest[index_] = val_loss_perType[index_]
+                bestWeight[index_] = copy.deepcopy(model.state_dict())
+                
+        print('epoch:{}, train_loss: {:+.3f}, val_loss: {:+.3f}, \ntrain_vector: {}, \nval_vector  : {}\n'.format(epoch+epoch0,train_loss/i,val_loss,\
+                                                            '|'.join(['%+.2f'%i for i in train_loss_perType/i]),\
+                                                            '|'.join(['%+.2f'%i for i in val_loss_perType])))
+        train_loss_list.append(train_loss_perType/i)
+        val_loss_list.append(val_loss_perType)
+        if scheduler is not None:
+            scheduler.step(val_loss)
+                
+        # early stop
+        if np.any(val_loss_perType==lossBest):
+            counter = 0
+        else:
+            counter+= 1
+            if counter >= patience:
+                print('----early stop at epoch {}----'.format(epoch))
+                return model,train_loss_list,val_loss_list,bestWeight
+            
+    time_elapsed = time.time() - since
+    print('Training completed in {}s'.format(time_elapsed))
+    return model,train_loss_list,val_loss_list,bestWeight
     
 def save_results(train_loss_perType,val_loss_perType,reuse,block,head,data,batch_size,dim,clip,layer1,layer2,factor,epochs,postStr='base'):
     epochs = len(train_loss_perType)
