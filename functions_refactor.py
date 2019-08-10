@@ -319,6 +319,79 @@ class set2setHead_type(torch.nn.Module):
         yhat = self.linear(yhat).squeeze(1)
         return yhat
 
+class SimplyInteraction_noEdge(torch.nn.Module):
+    def __init__(self,xDim,factor=2,IntDim=8,catFactor=2):
+        # None in FunList mean identity func
+        super(SimplyInteraction_noEdge, self).__init__()
+        self.w0 = nn.Parameter(torch.Tensor(IntDim,xDim*catFactor,xDim*factor*catFactor))
+        self.b0 = nn.Parameter(torch.Tensor(IntDim,xDim*factor*catFactor))
+        self.w1 = nn.Parameter(torch.Tensor(IntDim,xDim*factor*catFactor,1))
+        self.b1 = nn.Parameter(torch.Tensor(IntDim,1))
+        self.reset_parameters()
+        
+    def reset_parameters(self):
+        init.kaiming_uniform_(self.w0)
+        init.kaiming_uniform_(self.w1)
+        
+        fan_in = self.w0.size(2)
+        bound = 1 / math.sqrt(fan_in)
+        init.uniform_(self.b0, -bound, bound)
+        fan_in = self.w1.size(2)
+        bound = 1 / math.sqrt(fan_in)
+        init.uniform_(self.b1, -bound, bound)
+        
+    def forward(self,x,edge_index3,edge_attr3,edge_attr3_old):
+        temp = x[edge_index3] # (2,N,d)
+        out = torch.cat([temp[0],temp[1]],1)
+        out = F.relu(torch.einsum('np,dpq->ndq',out,self.w0) + self.b0)
+        out = torch.einsum('ndp,dpq->ndq',out,self.w1) + self.b1
+        out = out.squeeze(2)
+        return out[edge_attr3_old.to(torch.bool)]
+    
+class cat3HeadInteraction_noEdge(torch.nn.Module):
+    def __init__(self,xDim,factor=2,IntDim=8,catFactor=3):
+        # None in FunList mean identity func
+        super(cat3HeadInteraction_noEdge, self).__init__()
+        self.w0 = nn.Parameter(torch.Tensor(IntDim,xDim*catFactor,xDim*factor*catFactor))
+        self.b0 = nn.Parameter(torch.Tensor(IntDim,xDim*factor*catFactor))
+        self.w1 = nn.Parameter(torch.Tensor(IntDim,xDim*factor*catFactor,1))
+        self.b1 = nn.Parameter(torch.Tensor(IntDim,1))
+        self.reset_parameters()
+        
+    def reset_parameters(self):
+        init.kaiming_uniform_(self.w0)
+        init.kaiming_uniform_(self.w1)
+        
+        fan_in = self.w0.size(2)
+        bound = 1 / math.sqrt(fan_in)
+        init.uniform_(self.b0, -bound, bound)
+        fan_in = self.w1.size(2)
+        bound = 1 / math.sqrt(fan_in)
+        init.uniform_(self.b1, -bound, bound)
+        
+    def forward(self,x,edge_index3,edge_attr3,edge_attr3_old):
+        temp = x[edge_index3] # (2,N,d)
+        out = torch.cat([temp.mean(0),temp[0]*temp[1],(temp[0]-temp[1])**2],1)
+        out = F.relu(torch.einsum('np,dpq->ndq',out,self.w0) + self.b0)
+        out = torch.einsum('ndp,dpq->ndq',out,self.w1) + self.b1
+        out = out.squeeze(2)
+        return out[edge_attr3_old.to(torch.bool)]
+
+class head_edge2(torch.nn.Module):
+    # input is node level instead of edge level
+    def __init__(self,dim,edge_shape):
+        factor = 2
+        catFactor = 2
+        super(head_edge2, self).__init__()
+        self.linear = Sequential(Linear(dim*catFactor, dim*factor*catFactor),ReLU(), \
+                                 Linear(dim*factor*catFactor, edge_shape))
+        
+    def forward(self,out,edge_index3):
+        temp = out[edge_index3] # (2,N,d)
+        out = torch.cat([temp[0],temp[1]],1)        
+        out = self.linear(out).squeeze(1)
+        return out
+
 class head_mol(torch.nn.Module):
     def __init__(self,dim,mol_shape):
         factor = 2
@@ -930,6 +1003,98 @@ class GNN_multiHead_interleave(torch.nn.Module):
                 y_mol = self.head_mol(out,data.batch)
                 y_atom = self.head_atom(out)
                 y_edge = self.head_edge(edge_attr3)
+                loss_other = weight * (torch.mean(torch.abs(data.y_mol - y_mol)) + \
+                                       torch.mean(torch.abs(data.y_atom - y_atom)) + \
+                                       torch.mean(torch.abs(data.y_coupling - y_edge)))
+
+            k = torch.sum(edge_attr3_old,0)
+            nonzeroIndex = torch.nonzero(k).squeeze(1)
+            abs_ = torch.abs(y-yhat).unsqueeze(1)
+            loss_perType = torch.zeros(8,device='cuda:0')
+            if logLoss:
+                loss_perType[nonzeroIndex] = torch.log(torch.sum(abs_ * edge_attr3_old[:,nonzeroIndex],0)/k[nonzeroIndex])
+                loss = torch.sum(loss_perType)/nonzeroIndex.shape[0]
+                return loss+loss_other,loss_perType         
+            else:
+                loss_perType[nonzeroIndex] = torch.sum(abs_ * edge_attr3_old[:,nonzeroIndex],0)/k[nonzeroIndex]
+                loss = torch.sum(loss_perType)/nonzeroIndex.shape[0]
+                loss_perType[nonzeroIndex] = torch.log(loss_perType[nonzeroIndex])
+                return loss+loss_other,loss_perType
+        else:
+            return yhat
+
+class GNN_multiHead_noEdge(torch.nn.Module):
+    # no edge update
+    def __init__(self,reuse,block,head,head_mol,head_atom,head_edge,dim,layer1,layer2,factor,\
+                 node_in,edge_in,edge_in4,edge_in3=8,mol_shape=4,atom_shape=10,edge_shape=4,aggr='mean',interleave=False):
+        # block,head are nn.Module
+        # node_in,edge_in are dim for bonding and edge_in4,edge_in3 for coupling
+        super(GNN_multiHead_noEdge, self).__init__()
+        if interleave:
+            assert layer1==layer2,'layer1 needs to be the same as layer2'
+        self.interleave = interleave
+        self.lin_node = Sequential(BatchNorm1d(node_in),Linear(node_in, dim*factor),LeakyReLU(), \
+                                   BatchNorm1d(dim*factor),Linear(dim*factor, dim),LeakyReLU())
+
+        self.edge1 = Sequential(BatchNorm1d(edge_in),Linear(edge_in, dim*factor),LeakyReLU(), \
+                                   BatchNorm1d(dim*factor),Linear(dim*factor, dim),LeakyReLU())
+
+        self.edge2 = Sequential(BatchNorm1d(edge_in4+edge_in3),Linear(edge_in4+edge_in3, dim*factor),LeakyReLU(), \
+                                   BatchNorm1d(dim*factor),Linear(dim*factor, dim),LeakyReLU())        
+        if reuse:
+            self.conv1 = block(dim=dim,edge_dim=dim,aggr=aggr)
+            self.conv2 = block(dim=dim,edge_dim=dim,aggr=aggr)
+        else:
+            self.conv1 = nn.ModuleList([block(dim=dim,edge_dim=dim,aggr=aggr) for _ in range(layer1)])
+            self.conv2 = nn.ModuleList([block(dim=dim,edge_dim=dim,aggr=aggr) for _ in range(layer2)])            
+        
+        self.head = head(dim)
+        self.head_mol = head_mol(dim,mol_shape)
+        self.head_atom = head_atom(dim,atom_shape)
+        self.head_edge = head_edge(dim,edge_shape)
+        
+    def forward(self, data,IsTrain=False,typeTrain=False,logLoss=True,weight=None):
+        out = self.lin_node(data.x)
+        # edge_*3 only does not repeat for undirected graph. Hence need to add (j,i) to (i,j) in edges
+        edge_index3 = torch.cat([data.edge_index3,data.edge_index3[[1,0]]],1)
+        n = data.edge_attr3.shape[0]
+        temp_ = self.edge2(torch.cat([data.edge_attr3,data.edge_attr4],1))
+        edge_attr3 = torch.cat([temp_,temp_],0)
+        
+        edge_attr = self.edge1(data.edge_attr)
+        
+        if self.interleave:
+            for conv1,conv2 in zip(self.conv1,self.conv2):
+                out = conv1(out,data.edge_index,edge_attr)
+                out = conv2(out,edge_index3,edge_attr3)
+        else:
+            for conv in self.conv1:
+                out = conv(out,data.edge_index,edge_attr)
+            for conv in self.conv2:
+                out = conv(out,edge_index3,edge_attr3)    
+        
+        edge_attr3 = edge_attr3[:n]
+        if typeTrain:
+            if IsTrain:
+                y = data.y[data.type_attr]
+            edge_attr3 = edge_attr3[data.type_attr]
+            edge_index3 = data.edge_index3[:,data.type_attr]
+            edge_attr3_old = data.edge_attr3[data.type_attr]
+        else:
+            if IsTrain:
+                y = data.y
+            edge_index3 = data.edge_index3
+            edge_attr3_old = data.edge_attr3
+            
+        yhat = self.head(out,edge_index3,edge_attr3,edge_attr3_old)
+        
+        if IsTrain:
+            if weight is None:
+                loss_other = 0
+            else:
+                y_mol = self.head_mol(out,data.batch)
+                y_atom = self.head_atom(out)
+                y_edge = self.head_edge(out,edge_index3)
                 loss_other = weight * (torch.mean(torch.abs(data.y_mol - y_mol)) + \
                                        torch.mean(torch.abs(data.y_atom - y_atom)) + \
                                        torch.mean(torch.abs(data.y_coupling - y_edge)))
