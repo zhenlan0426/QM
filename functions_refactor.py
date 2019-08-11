@@ -1227,11 +1227,12 @@ class MetaLayer_block(torch.nn.Module):
 class GNN_MataLayer(torch.nn.Module):
     # for MEGNet only
     def __init__(self,head,head_mol,head_atom,head_edge,dim,layer1,layer2,factor,\
-                 node_in,edge_in,edge_in4,edge_in3=8,mol_shape=4,atom_shape=10,edge_shape=4,BatchNorm=True,useMax=False,interleave=False):
+                 node_in,edge_in,edge_in4,edge_in3=8,mol_shape=4,atom_shape=10,edge_shape=4,BatchNorm=True,useMax=False,interleave=False,u_shape=None):
         # block,head are nn.Module
         # node_in,edge_in are dim for bonding and edge_in4,edge_in3 for coupling
         super(GNN_MataLayer, self).__init__()
         self.useMax = useMax
+        self.u_shape = u_shape
         if interleave:
             assert layer1==layer2,'layer1 needs to be the same as layer2'
         self.interleave = interleave
@@ -1242,9 +1243,14 @@ class GNN_MataLayer(torch.nn.Module):
                                    BatchNorm1d(dim*factor),Linear(dim*factor, dim),LeakyReLU())
 
         self.edge2 = Sequential(BatchNorm1d(edge_in4+edge_in3),Linear(edge_in4+edge_in3, dim*factor),LeakyReLU(), \
-                                   BatchNorm1d(dim*factor),Linear(dim*factor, dim),LeakyReLU())        
-        self.u_mlp = Sequential(BatchNorm1d(2*dim),Linear(2*dim, 2*dim*factor),LeakyReLU(), \
-                                   BatchNorm1d(2*dim*factor),Linear(2*dim*factor, dim),LeakyReLU())        
+                                   BatchNorm1d(dim*factor),Linear(dim*factor, dim),LeakyReLU())
+        
+        if u_shape is None:
+            self.u_mlp = Sequential(BatchNorm1d(2*dim),Linear(2*dim, 2*dim*factor),LeakyReLU(), \
+                                       BatchNorm1d(2*dim*factor),Linear(2*dim*factor, dim),LeakyReLU())
+        else:
+            self.u_mlp = Sequential(BatchNorm1d(u_shape),Linear(u_shape, dim*factor),LeakyReLU(), \
+                                       BatchNorm1d(dim*factor),Linear(dim*factor, dim),LeakyReLU())
         
         self.conv1 = nn.ModuleList([MetaLayer_block(dim,BatchNorm=BatchNorm,factor=factor,useMax=useMax) for _ in range(layer1)])
         self.conv2 = nn.ModuleList([MetaLayer_block(dim,BatchNorm=BatchNorm,factor=factor,useMax=useMax) for _ in range(layer2)])            
@@ -1263,11 +1269,14 @@ class GNN_MataLayer(torch.nn.Module):
         edge_attr3 = torch.cat([temp_,temp_],0)
         edge_attr = self.edge1(data.edge_attr)
         
-        if self.useMax:
-            u = torch.cat([scatter_max(out, data.batch, dim=0)[0],scatter_max(edge_attr, data.batch[data.edge_index[0]], dim=0)[0]], dim=1)
+        if self.u_shape is None:
+            if self.useMax:
+                u = torch.cat([scatter_max(out, data.batch, dim=0)[0],scatter_max(edge_attr, data.batch[data.edge_index[0]], dim=0)[0]], dim=1)
+            else:
+                u = torch.cat([scatter_mean(out, data.batch, dim=0),scatter_mean(edge_attr, data.batch[data.edge_index[0]], dim=0)], dim=1)
+            u = self.u_mlp(u)
         else:
-            u = torch.cat([scatter_mean(out, data.batch, dim=0),scatter_mean(edge_attr, data.batch[data.edge_index[0]], dim=0)], dim=1)
-        u = self.u_mlp(u)
+            u = self.u_mlp(data.u)
         
         if self.interleave:
             for conv1,conv2 in zip(self.conv1,self.conv2):
