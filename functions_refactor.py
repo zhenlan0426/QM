@@ -698,7 +698,104 @@ class MEGNet_block(torch.nn.Module):
         return x+x_new,edge_attr+edge_new
     
     def __repr__(self):
-        return 'MEGNet_block'    
+        return 'MEGNet_block_Dense'    
+
+class schnet_block_Dense(torch.nn.Module):
+    # use both types of edges
+    def __init__(self,dim=64,edge_dim=12,aggr='mean'):
+        super(schnet_block_Dense, self).__init__()
+        
+        nn = Sequential(BatchNorm1d(edge_dim),Linear(edge_dim, dim*2),ReLU(), \
+                        BatchNorm1d(dim*2),Linear(dim*2, dim))
+        self.conv = NNConv2(dim, dim, nn, aggr=aggr, root_weight=False)
+        self.lin_covert = Sequential(BatchNorm1d(dim),Linear(dim, dim*2),ReLU(), \
+                                     BatchNorm1d(dim*2),Linear(dim*2, dim))
+        
+    def forward(self, x, edge_index, edge_attr):
+        m = F.relu(self.conv(x, edge_index, edge_attr))
+        m = self.lin_covert(m)
+        return torch.cat([x,m],1)
+
+class NNConv_block_Dense(torch.nn.Module):
+    # use both types of edges
+    def __init__(self,dim=64,edge_dim=12,aggr='mean'):
+        super(NNConv_block_Dense, self).__init__()
+        
+        nn = Sequential(BatchNorm1d(edge_dim),Linear(edge_dim, dim*dim))
+        self.conv = NNConv(dim, dim, nn, aggr=aggr, root_weight=False)
+        self.gru = GRU(dim, dim)
+        
+    def forward(self, x, edge_index, edge_attr):
+        m = F.relu(self.conv(x, edge_index, edge_attr))
+        out, _ = self.gru(m.unsqueeze(0), x.unsqueeze(0))
+        return torch.cat([x,out.squeeze(0)],1)
+
+class MEGNet_block_Dense(torch.nn.Module):
+    def __init__(self,dim,aggr='mean'):
+        super(MEGNet_block_Dense, self).__init__()
+        cat_factor = 1
+        multiple_factor = 3        
+        self.v_update =  Sequential(BatchNorm1d(dim*cat_factor),
+                                    Linear(dim*cat_factor,dim*cat_factor*multiple_factor),
+                                    LeakyReLU(inplace=True),
+                                    BatchNorm1d(dim*cat_factor*multiple_factor),
+                                    Linear(dim*cat_factor*multiple_factor,dim))
+        self.e_update = Sequential( BatchNorm1d(dim*cat_factor),
+                                    Linear(dim*cat_factor,dim*cat_factor*multiple_factor),
+                                    BatchNorm1d(dim*cat_factor*multiple_factor),
+                                    LeakyReLU(inplace=True),
+                                    Linear(dim*cat_factor*multiple_factor,dim))        
+        self.conv = MEGNet(dim,aggr=aggr)
+    
+    def forward(self, x, edge_index, edge_attr):
+        x_new,edge_new = self.conv(x, edge_index, edge_attr)
+        x_new = self.v_update(x_new)
+        edge_new = self.e_update(edge_new)
+        return torch.cat([x,x_new],1),torch.cat([edge_attr,edge_new],1)
+    
+class MetaLayer_block_Dense(torch.nn.Module):
+    def __init__(self,dim,BatchNorm=True,factor=2,useMax=False):
+        super(MetaLayer_block_Dense, self).__init__()
+        if BatchNorm:
+            self.v_update = Sequential(BatchNorm1d(dim),
+                                        Linear(dim,dim*factor),
+                                        LeakyReLU(inplace=True),
+                                        BatchNorm1d(dim*factor),
+                                        Linear(dim*factor,dim))
+            self.e_update = Sequential(BatchNorm1d(dim),
+                                        Linear(dim,dim*factor),
+                                        LeakyReLU(inplace=True),
+                                        BatchNorm1d(dim*factor),
+                                        Linear(dim*factor,dim))
+            self.u_update = Sequential(BatchNorm1d(dim),
+                                        Linear(dim,dim*factor),
+                                        LeakyReLU(inplace=True),
+                                        BatchNorm1d(dim*factor),
+                                        Linear(dim*factor,dim))
+        else:
+            self.v_update = Sequential(Linear(dim,dim*factor),
+                                        LeakyReLU(inplace=True),
+                                        Linear(dim*factor,dim))
+            self.e_update = Sequential(Linear(dim,dim*factor),
+                                        LeakyReLU(inplace=True),
+                                        Linear(dim*factor,dim))
+            self.u_update = Sequential(Linear(dim,dim*factor),
+                                        LeakyReLU(inplace=True),
+                                        Linear(dim*factor,dim))
+            
+        self.conv = MetaLayer(EdgeModel(dim,BatchNorm=BatchNorm,factor=factor,useMax=useMax), \
+                              NodeModel(dim,BatchNorm=BatchNorm,factor=factor,useMax=useMax), \
+                              GlobalModel(dim,BatchNorm=BatchNorm,factor=factor,useMax=useMax))
+    
+    def forward(self, x, edge_index, edge_attr, u, batch):
+        x_new, edge_attr_new, u_new = self.conv(x, edge_index, edge_attr, u, batch)
+        x_new = self.v_update(x_new)
+        edge_attr_new = self.e_update(edge_attr_new)
+        u_new = self.u_update(u_new)
+        return torch.cat([x,x_new],1),torch.cat([edge_attr,edge_attr_new],1),torch.cat([u,u_new],1)
+    
+    def __repr__(self):
+        return 'MetaLayer_block_Dense'     
     
 '''------------------------------------------------------------------------------------------------------------------'''
 '''------------------------------------------------------ Main ------------------------------------------------------'''
@@ -1329,6 +1426,302 @@ class GNN_MataLayer(torch.nn.Module):
                 return loss+loss_other,loss_perType
         else:
             return yhat
+
+
+class GNN_multiHead_noEdge_Dense(torch.nn.Module):
+    # no edge update
+    def __init__(self,block,head,head_mol,head_atom,head_edge,dim,factor,\
+                 node_in,edge_in,edge_in4,edge_in3=8,mol_shape=4,atom_shape=10,edge_shape=4,aggr='mean',layer1=3,layer2=3,interleave=False):
+        # dim = 32 gives 32*2**5 => 1024
+        super(GNN_multiHead_noEdge_Dense, self).__init__()
+        self.interleave = interleave
+        self.lin_node = Sequential(BatchNorm1d(node_in),Linear(node_in, dim*factor),LeakyReLU(), \
+                                   BatchNorm1d(dim*factor),Linear(dim*factor, dim),LeakyReLU())
+
+        self.edge1 = Sequential(BatchNorm1d(edge_in),Linear(edge_in, dim*factor),LeakyReLU(), \
+                                   BatchNorm1d(dim*factor),Linear(dim*factor, dim),LeakyReLU())
+
+        self.edge2 = Sequential(BatchNorm1d(edge_in4+edge_in3),Linear(edge_in4+edge_in3, dim*factor),LeakyReLU(), \
+                                   BatchNorm1d(dim*factor),Linear(dim*factor, dim),LeakyReLU())        
+        if interleave:
+            self.conv = nn.ModuleList([block(dim=dim*2**i,edge_dim=dim,aggr=aggr) for i in range(layer1+layer2)])
+        else:
+            self.conv1 = nn.ModuleList([block(dim=dim*2**i,edge_dim=dim,aggr=aggr) for i in range(layer1)])
+            self.conv2 = nn.ModuleList([block(dim=dim*2**i,edge_dim=dim,aggr=aggr) for i in range(layer1,layer1+layer2)])
+            
+        final_dim = dim*2**(layer1+layer2)
+        self.head = head(final_dim)
+        self.head_mol = head_mol(final_dim,mol_shape)
+        self.head_atom = head_atom(final_dim,atom_shape)
+        self.head_edge = head_edge(final_dim,edge_shape)
+        
+    def forward(self, data,IsTrain=False,typeTrain=False,logLoss=True,weight=None):
+        out = self.lin_node(data.x)
+        # edge_*3 only does not repeat for undirected graph. Hence need to add (j,i) to (i,j) in edges
+        edge_index3 = torch.cat([data.edge_index3,data.edge_index3[[1,0]]],1)
+        n = data.edge_attr3.shape[0]
+        temp_ = self.edge2(torch.cat([data.edge_attr3,data.edge_attr4],1))
+        edge_attr3 = torch.cat([temp_,temp_],0)
+        
+        edge_attr = self.edge1(data.edge_attr)
+        
+        if self.interleave:
+            for tmp_,conv in enumerate(self.conv):
+                if tmp_%2==0:
+                    out = conv(out,data.edge_index,edge_attr)
+                else:
+                    out = conv(out,edge_index3,edge_attr3)
+        else:
+            for conv in self.conv1:
+                out = conv(out,data.edge_index,edge_attr)
+            for conv in self.conv2:
+                out = conv(out,edge_index3,edge_attr3)    
+        
+        edge_attr3 = edge_attr3[:n]
+        if typeTrain:
+            if IsTrain:
+                y = data.y[data.type_attr]
+            edge_attr3 = edge_attr3[data.type_attr]
+            edge_index3 = data.edge_index3[:,data.type_attr]
+            edge_attr3_old = data.edge_attr3[data.type_attr]
+        else:
+            if IsTrain:
+                y = data.y
+            edge_index3 = data.edge_index3
+            edge_attr3_old = data.edge_attr3
+            
+        yhat = self.head(out,edge_index3,edge_attr3,edge_attr3_old)
+        
+        if IsTrain:
+            if weight is None:
+                loss_other = 0
+            else:
+                y_mol = self.head_mol(out,data.batch)
+                y_atom = self.head_atom(out)
+                y_edge = self.head_edge(out,edge_index3)
+                loss_other = weight * (torch.mean(torch.abs(data.y_mol - y_mol)) + \
+                                       torch.mean(torch.abs(data.y_atom - y_atom)) + \
+                                       torch.mean(torch.abs(data.y_coupling - y_edge)))
+
+            k = torch.sum(edge_attr3_old,0)
+            nonzeroIndex = torch.nonzero(k).squeeze(1)
+            abs_ = torch.abs(y-yhat).unsqueeze(1)
+            loss_perType = torch.zeros(8,device='cuda:0')
+            if logLoss:
+                loss_perType[nonzeroIndex] = torch.log(torch.sum(abs_ * edge_attr3_old[:,nonzeroIndex],0)/k[nonzeroIndex])
+                loss = torch.sum(loss_perType)/nonzeroIndex.shape[0]
+                return loss+loss_other,loss_perType         
+            else:
+                loss_perType[nonzeroIndex] = torch.sum(abs_ * edge_attr3_old[:,nonzeroIndex],0)/k[nonzeroIndex]
+                loss = torch.sum(loss_perType)/nonzeroIndex.shape[0]
+                loss_perType[nonzeroIndex] = torch.log(loss_perType[nonzeroIndex])
+                return loss+loss_other,loss_perType
+        else:
+            return yhat
+        
+class GNN_multiHead_interleave_Dense(torch.nn.Module):
+    # for MEGNet only
+    def __init__(self,block,head,head_mol,head_atom,head_edge,dim,factor,\
+                 node_in,edge_in,edge_in4,edge_in3=8,mol_shape=4,atom_shape=10,edge_shape=4,aggr='mean',interleave=False,layer1=3,layer2=3):
+        # block,head are nn.Module
+        # node_in,edge_in are dim for bonding and edge_in4,edge_in3 for coupling
+        super(GNN_multiHead_interleave_Dense, self).__init__()
+        self.interleave = interleave
+        self.lin_node = Sequential(BatchNorm1d(node_in),Linear(node_in, dim*factor),LeakyReLU(), \
+                                   BatchNorm1d(dim*factor),Linear(dim*factor, dim),LeakyReLU())
+
+        self.edge1 = Sequential(BatchNorm1d(edge_in),Linear(edge_in, dim*factor),LeakyReLU(), \
+                                   BatchNorm1d(dim*factor),Linear(dim*factor, dim),LeakyReLU())
+
+        self.edge2 = Sequential(BatchNorm1d(edge_in4+edge_in3),Linear(edge_in4+edge_in3, dim*factor),LeakyReLU(), \
+                                   BatchNorm1d(dim*factor),Linear(dim*factor, dim),LeakyReLU())        
+        if interleave:
+            self.conv = nn.ModuleList([block(dim=dim*2**i,aggr=aggr) for i in range(layer1+layer2)])
+        else:
+            self.conv1 = nn.ModuleList([block(dim=dim*2**i,aggr=aggr) for i in range(layer1)])
+            self.conv2 = nn.ModuleList([block(dim=dim*2**i,aggr=aggr) for i in range(layer1,layer1+layer2)])            
+            
+        final_dim = dim*2**(layer1+layer2)
+        self.head = head(final_dim)
+        self.head_mol = head_mol(final_dim,mol_shape)
+        self.head_atom = head_atom(final_dim,atom_shape)
+        self.head_edge = head_edge(final_dim,edge_shape)
+        
+    def forward(self, data,IsTrain=False,typeTrain=False,logLoss=True,weight=None):
+        out = self.lin_node(data.x)
+        # edge_*3 only does not repeat for undirected graph. Hence need to add (j,i) to (i,j) in edges
+        edge_index3 = torch.cat([data.edge_index3,data.edge_index3[[1,0]]],1)
+        n = data.edge_attr3.shape[0]
+        temp_ = self.edge2(torch.cat([data.edge_attr3,data.edge_attr4],1))
+        edge_attr3 = torch.cat([temp_,temp_],0)
+        edge_attr = self.edge1(data.edge_attr)
+
+        if self.interleave:
+            for tmp_,conv in enumerate(self.conv):
+                if tmp_%2==0:
+                    out,edge_attr = conv(out,data.edge_index,edge_attr)
+                else:
+                    out,edge_attr3 = conv(out,edge_index3,edge_attr3)
+        else:
+            for conv in self.conv1:
+                out,edge_attr = conv(out,data.edge_index,edge_attr)
+            for conv in self.conv2:
+                out,edge_attr3 = conv(out,edge_index3,edge_attr3)    
+        
+        edge_attr3 = edge_attr3[:n]
+        if typeTrain:
+            if IsTrain:
+                y = data.y[data.type_attr]
+            edge_attr3 = edge_attr3[data.type_attr]
+            edge_index3 = data.edge_index3[:,data.type_attr]
+            edge_attr3_old = data.edge_attr3[data.type_attr]
+        else:
+            if IsTrain:
+                y = data.y
+            edge_index3 = data.edge_index3
+            edge_attr3_old = data.edge_attr3
+            
+        yhat = self.head(out,edge_index3,edge_attr3,edge_attr3_old)
+        
+        if IsTrain:
+            if weight is None:
+                loss_other = 0
+            else:
+                y_mol = self.head_mol(out,data.batch)
+                y_atom = self.head_atom(out)
+                y_edge = self.head_edge(edge_attr3)
+                loss_other = weight * (torch.mean(torch.abs(data.y_mol - y_mol)) + \
+                                       torch.mean(torch.abs(data.y_atom - y_atom)) + \
+                                       torch.mean(torch.abs(data.y_coupling - y_edge)))
+
+            k = torch.sum(edge_attr3_old,0)
+            nonzeroIndex = torch.nonzero(k).squeeze(1)
+            abs_ = torch.abs(y-yhat).unsqueeze(1)
+            loss_perType = torch.zeros(8,device='cuda:0')
+            if logLoss:
+                loss_perType[nonzeroIndex] = torch.log(torch.sum(abs_ * edge_attr3_old[:,nonzeroIndex],0)/k[nonzeroIndex])
+                loss = torch.sum(loss_perType)/nonzeroIndex.shape[0]
+                return loss+loss_other,loss_perType         
+            else:
+                loss_perType[nonzeroIndex] = torch.sum(abs_ * edge_attr3_old[:,nonzeroIndex],0)/k[nonzeroIndex]
+                loss = torch.sum(loss_perType)/nonzeroIndex.shape[0]
+                loss_perType[nonzeroIndex] = torch.log(loss_perType[nonzeroIndex])
+                return loss+loss_other,loss_perType
+        else:
+            return yhat 
+        
+class GNN_MataLayer_Dense(torch.nn.Module):
+    # for MEGNet only
+    def __init__(self,head,head_mol,head_atom,head_edge,dim,factor,\
+                 node_in,edge_in,edge_in4,edge_in3=8,mol_shape=4,atom_shape=10,edge_shape=4,BatchNorm=True,useMax=False,interleave=False,u_shape=None,layer1=3,layer2=3):
+        # block,head are nn.Module
+        # node_in,edge_in are dim for bonding and edge_in4,edge_in3 for coupling
+        super(GNN_MataLayer_Dense, self).__init__()
+        self.useMax = useMax
+        self.u_shape = u_shape
+        if interleave:
+            assert layer1==layer2,'layer1 needs to be the same as layer2'
+        self.interleave = interleave
+        self.lin_node = Sequential(BatchNorm1d(node_in),Linear(node_in, dim*factor),LeakyReLU(), \
+                                   BatchNorm1d(dim*factor),Linear(dim*factor, dim),LeakyReLU())
+
+        self.edge1 = Sequential(BatchNorm1d(edge_in),Linear(edge_in, dim*factor),LeakyReLU(), \
+                                   BatchNorm1d(dim*factor),Linear(dim*factor, dim),LeakyReLU())
+
+        self.edge2 = Sequential(BatchNorm1d(edge_in4+edge_in3),Linear(edge_in4+edge_in3, dim*factor),LeakyReLU(), \
+                                   BatchNorm1d(dim*factor),Linear(dim*factor, dim),LeakyReLU())
+        
+        if u_shape is None:
+            self.u_mlp = Sequential(BatchNorm1d(2*dim),Linear(2*dim, 2*dim*factor),LeakyReLU(), \
+                                       BatchNorm1d(2*dim*factor),Linear(2*dim*factor, dim),LeakyReLU())
+        else:
+            self.u_mlp = Sequential(BatchNorm1d(u_shape),Linear(u_shape, dim*factor),LeakyReLU(), \
+                                       BatchNorm1d(dim*factor),Linear(dim*factor, dim),LeakyReLU())
+
+        if interleave:
+            self.conv = nn.ModuleList([MetaLayer_block_Dense(dim*2**i,BatchNorm=BatchNorm,factor=factor,useMax=useMax) for i in range(layer1+layer2)])
+        else:
+            self.conv1 = nn.ModuleList([MetaLayer_block_Dense(dim*2**i,BatchNorm=BatchNorm,factor=factor,useMax=useMax) for i in range(layer1)])
+            self.conv2 = nn.ModuleList([MetaLayer_block_Dense(dim*2**i,BatchNorm=BatchNorm,factor=factor,useMax=useMax) for i in range(layer1,layer1+layer2)])         
+                 
+        final_dim = dim*2**(layer1+layer2)
+        self.head = head(final_dim)
+        self.head_mol = head_mol(final_dim,mol_shape)
+        self.head_atom = head_atom(final_dim,atom_shape)
+        self.head_edge = head_edge(final_dim,edge_shape)
+        
+    def forward(self, data,IsTrain=False,typeTrain=False,logLoss=True,weight=None):
+        out = self.lin_node(data.x)
+        # edge_*3 only does not repeat for undirected graph. Hence need to add (j,i) to (i,j) in edges
+        edge_index3 = torch.cat([data.edge_index3,data.edge_index3[[1,0]]],1)
+        n = data.edge_attr3.shape[0]
+        temp_ = self.edge2(torch.cat([data.edge_attr3,data.edge_attr4],1))
+        edge_attr3 = torch.cat([temp_,temp_],0)
+        edge_attr = self.edge1(data.edge_attr)
+        
+        if self.u_shape is None:
+            if self.useMax:
+                u = torch.cat([scatter_max(out, data.batch, dim=0)[0],scatter_max(edge_attr, data.batch[data.edge_index[0]], dim=0)[0]], dim=1)
+            else:
+                u = torch.cat([scatter_mean(out, data.batch, dim=0),scatter_mean(edge_attr, data.batch[data.edge_index[0]], dim=0)], dim=1)
+            u = self.u_mlp(u)
+        else:
+            u = self.u_mlp(data.u)
+
+        if self.interleave:
+            for tmp_,conv in enumerate(self.conv):
+                if tmp_%2==0:
+                    out,edge_attr,u = conv(out, data.edge_index, edge_attr, u, data.batch)
+                else:
+                    out,edge_attr3,u = conv(out,edge_index3,edge_attr3, u, data.batch)
+        else:
+            for conv in self.conv1:
+                out,edge_attr,u = conv(out, data.edge_index, edge_attr, u, data.batch)
+            for conv in self.conv2:
+                out,edge_attr3,u = conv(out,edge_index3,edge_attr3, u, data.batch)
+        
+        edge_attr3 = edge_attr3[:n]
+        if typeTrain:
+            if IsTrain:
+                y = data.y[data.type_attr]
+            edge_attr3 = edge_attr3[data.type_attr]
+            edge_index3 = data.edge_index3[:,data.type_attr]
+            edge_attr3_old = data.edge_attr3[data.type_attr]
+        else:
+            if IsTrain:
+                y = data.y
+            edge_index3 = data.edge_index3
+            edge_attr3_old = data.edge_attr3
+            
+        yhat = self.head(out,edge_index3,edge_attr3,edge_attr3_old)
+        
+        if IsTrain:
+            if weight is None:
+                loss_other = 0
+            else:
+                y_mol = self.head_mol(u)
+                y_atom = self.head_atom(out)
+                y_edge = self.head_edge(edge_attr3)
+                loss_other = weight * (torch.mean(torch.abs(data.y_mol - y_mol)) + \
+                                       torch.mean(torch.abs(data.y_atom - y_atom)) + \
+                                       torch.mean(torch.abs(data.y_coupling - y_edge)))
+
+            k = torch.sum(edge_attr3_old,0)
+            nonzeroIndex = torch.nonzero(k).squeeze(1)
+            abs_ = torch.abs(y-yhat).unsqueeze(1)
+            loss_perType = torch.zeros(8,device='cuda:0')
+            if logLoss:
+                loss_perType[nonzeroIndex] = torch.log(torch.sum(abs_ * edge_attr3_old[:,nonzeroIndex],0)/k[nonzeroIndex])
+                loss = torch.sum(loss_perType)/nonzeroIndex.shape[0]
+                return loss+loss_other,loss_perType         
+            else:
+                loss_perType[nonzeroIndex] = torch.sum(abs_ * edge_attr3_old[:,nonzeroIndex],0)/k[nonzeroIndex]
+                loss = torch.sum(loss_perType)/nonzeroIndex.shape[0]
+                loss_perType[nonzeroIndex] = torch.log(loss_perType[nonzeroIndex])
+                return loss+loss_other,loss_perType
+        else:
+            return yhat
+
 
 '''------------------------------------------------------------------------------------------------------------------'''
 '''----------------------------------------------------- utility -----------------------------------------------------'''
