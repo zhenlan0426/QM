@@ -1522,7 +1522,7 @@ class GNN_multiHead_noEdge_Dense(torch.nn.Module):
 class GNN_multiHead_interleave_Dense(torch.nn.Module):
     # for MEGNet only
     def __init__(self,block,head,head_mol,head_atom,head_edge,dim,factor,\
-                 node_in,edge_in,edge_in4,edge_in3=8,mol_shape=4,atom_shape=10,edge_shape=4,aggr='mean',interleave=False,layer1=3,layer2=3):
+                 node_in,edge_in,edge_in4,edge_in3=8,mol_shape=4,atom_shape=10,edge_shape=4,aggr='mean',interleave=False,layer1=3,layer2=2):
         # block,head are nn.Module
         # node_in,edge_in are dim for bonding and edge_in4,edge_in3 for coupling
         super(GNN_multiHead_interleave_Dense, self).__init__()
@@ -1532,14 +1532,16 @@ class GNN_multiHead_interleave_Dense(torch.nn.Module):
 
         self.edge1 = Sequential(BatchNorm1d(edge_in),Linear(edge_in, dim*factor),LeakyReLU(), \
                                    BatchNorm1d(dim*factor),Linear(dim*factor, dim),LeakyReLU())
-
-        self.edge2 = Sequential(BatchNorm1d(edge_in4+edge_in3),Linear(edge_in4+edge_in3, dim*factor),LeakyReLU(), \
-                                   BatchNorm1d(dim*factor),Linear(dim*factor, dim),LeakyReLU())        
+      
         if interleave:
             self.conv = nn.ModuleList([block(dim=dim*2**i,aggr=aggr) for i in range(layer1+layer2)])
+            self.edge2 = Sequential(BatchNorm1d(edge_in4+edge_in3),Linear(edge_in4+edge_in3, dim*factor),LeakyReLU(), \
+                                       BatchNorm1d(dim*factor),Linear(dim*factor, dim*2),LeakyReLU())              
         else:
             self.conv1 = nn.ModuleList([block(dim=dim*2**i,aggr=aggr) for i in range(layer1)])
-            self.conv2 = nn.ModuleList([block(dim=dim*2**i,aggr=aggr) for i in range(layer1,layer1+layer2)])            
+            self.conv2 = nn.ModuleList([block(dim=dim*2**i,aggr=aggr) for i in range(layer1,layer1+layer2)])   
+            self.edge2 = Sequential(BatchNorm1d(edge_in4+edge_in3),Linear(edge_in4+edge_in3, dim*factor),LeakyReLU(), \
+                                       BatchNorm1d(dim*factor),Linear(dim*factor, dim*2**layer1),LeakyReLU())              
             
         final_dim = dim*2**(layer1+layer2)
         self.head = head(final_dim)
@@ -1613,7 +1615,7 @@ class GNN_multiHead_interleave_Dense(torch.nn.Module):
 class GNN_MataLayer_Dense(torch.nn.Module):
     # for MEGNet only
     def __init__(self,head,head_mol,head_atom,head_edge,dim,factor,\
-                 node_in,edge_in,edge_in4,edge_in3=8,mol_shape=4,atom_shape=10,edge_shape=4,BatchNorm=True,useMax=False,interleave=False,u_shape=None,layer1=3,layer2=3):
+                 node_in,edge_in,edge_in4,edge_in3=8,mol_shape=4,atom_shape=10,edge_shape=4,BatchNorm=True,useMax=False,interleave=False,u_shape=None,layer1=3,layer2=2):
         # block,head are nn.Module
         # node_in,edge_in are dim for bonding and edge_in4,edge_in3 for coupling
         super(GNN_MataLayer_Dense, self).__init__()
@@ -1627,9 +1629,6 @@ class GNN_MataLayer_Dense(torch.nn.Module):
 
         self.edge1 = Sequential(BatchNorm1d(edge_in),Linear(edge_in, dim*factor),LeakyReLU(), \
                                    BatchNorm1d(dim*factor),Linear(dim*factor, dim),LeakyReLU())
-
-        self.edge2 = Sequential(BatchNorm1d(edge_in4+edge_in3),Linear(edge_in4+edge_in3, dim*factor),LeakyReLU(), \
-                                   BatchNorm1d(dim*factor),Linear(dim*factor, dim),LeakyReLU())
         
         if u_shape is None:
             self.u_mlp = Sequential(BatchNorm1d(2*dim),Linear(2*dim, 2*dim*factor),LeakyReLU(), \
@@ -1640,9 +1639,13 @@ class GNN_MataLayer_Dense(torch.nn.Module):
 
         if interleave:
             self.conv = nn.ModuleList([MetaLayer_block_Dense(dim*2**i,BatchNorm=BatchNorm,factor=factor,useMax=useMax) for i in range(layer1+layer2)])
+            self.edge2 = Sequential(BatchNorm1d(edge_in4+edge_in3),Linear(edge_in4+edge_in3, dim*factor),LeakyReLU(), \
+                                       BatchNorm1d(dim*factor),Linear(dim*factor, dim*2),LeakyReLU())            
         else:
             self.conv1 = nn.ModuleList([MetaLayer_block_Dense(dim*2**i,BatchNorm=BatchNorm,factor=factor,useMax=useMax) for i in range(layer1)])
-            self.conv2 = nn.ModuleList([MetaLayer_block_Dense(dim*2**i,BatchNorm=BatchNorm,factor=factor,useMax=useMax) for i in range(layer1,layer1+layer2)])         
+            self.conv2 = nn.ModuleList([MetaLayer_block_Dense(dim*2**i,BatchNorm=BatchNorm,factor=factor,useMax=useMax) for i in range(layer1,layer1+layer2)])
+            self.edge2 = Sequential(BatchNorm1d(edge_in4+edge_in3),Linear(edge_in4+edge_in3, dim*factor),LeakyReLU(), \
+                                       BatchNorm1d(dim*factor),Linear(dim*factor, dim*2**layer1),LeakyReLU())            
                  
         final_dim = dim*2**(layer1+layer2)
         self.head = head(final_dim)
