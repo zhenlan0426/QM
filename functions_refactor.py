@@ -796,6 +796,135 @@ class MetaLayer_block_Dense(torch.nn.Module):
     
     def __repr__(self):
         return 'MetaLayer_block_Dense'     
+
+class MEGNet2(MessagePassing_edgeUpdate):
+    # SchNet like node update in MEGNet
+    def __init__(self,dim,nn,aggr='mean'):
+        super(MEGNet2, self).__init__(aggr=aggr)
+        cat_factor = 2
+        multiple_factor = 3
+        self.dim = dim
+        self.nn = nn
+        self.v_update = Sequential(BatchNorm1d(dim*cat_factor),
+                                    Linear(dim*cat_factor,dim*cat_factor*multiple_factor),
+                                    LeakyReLU(inplace=True),
+                                    BatchNorm1d(dim*cat_factor*multiple_factor),
+                                    Linear(dim*cat_factor*multiple_factor,dim),
+                                    LeakyReLU(inplace=True))
+        
+        self.e_update = Sequential(BatchNorm1d(dim*cat_factor),
+                                    Linear(dim*cat_factor,dim*cat_factor*multiple_factor),
+                                    LeakyReLU(inplace=True),
+                                    BatchNorm1d(dim*cat_factor*multiple_factor),
+                                    Linear(dim*cat_factor*multiple_factor,dim),
+                                    LeakyReLU(inplace=True),)
+
+    def forward(self, x, edge_index, edge_attr):
+        return self.propagate(edge_index, x=x, edge_attr=edge_attr)
+
+    def message(self, x_i, x_j, edge_attr):
+        out = self.e_update(torch.cat([x_i+x_j,edge_attr],1))
+        weight = self.nn(out)
+        return x_j*weight,out
+
+    def update(self, aggr_out, x):
+        return self.v_update(torch.cat([aggr_out,x],1))
+
+    def __repr__(self):
+        return 'MEGNet2'
+
+class MEGNet3(MessagePassing_edgeUpdate):
+    # NNConv like node update in MEGNet
+    def __init__(self,dim,nn,aggr='mean'):
+        super(MEGNet3, self).__init__(aggr=aggr)
+        cat_factor = 2
+        multiple_factor = 3
+        self.dim = dim
+        self.nn = nn
+        self.v_update = Sequential(BatchNorm1d(dim*cat_factor),
+                                    Linear(dim*cat_factor,dim*cat_factor*multiple_factor),
+                                    LeakyReLU(inplace=True),
+                                    BatchNorm1d(dim*cat_factor*multiple_factor),
+                                    Linear(dim*cat_factor*multiple_factor,dim),
+                                    LeakyReLU(inplace=True))
+        
+        self.e_update = Sequential(BatchNorm1d(dim*cat_factor),
+                                    Linear(dim*cat_factor,dim*cat_factor*multiple_factor),
+                                    LeakyReLU(inplace=True),
+                                    BatchNorm1d(dim*cat_factor*multiple_factor),
+                                    Linear(dim*cat_factor*multiple_factor,dim),
+                                    LeakyReLU(inplace=True),)
+
+    def forward(self, x, edge_index, edge_attr):
+        return self.propagate(edge_index, x=x, edge_attr=edge_attr)
+
+    def message(self, x_i, x_j, edge_attr):
+        out = self.e_update(torch.cat([x_i+x_j,edge_attr],1))
+        weight = self.nn(out)
+        return torch.einsum('np,npq->nq',x_j,weight),out
+
+    def update(self, aggr_out, x):
+        return self.v_update(torch.cat([aggr_out,x],1))
+
+    def __repr__(self):
+        return 'MEGNet3'    
+    
+class MEGNet_block2(torch.nn.Module):
+    def __init__(self,dim,aggr='mean'):
+        super(MEGNet_block2, self).__init__()
+        cat_factor = 1
+        multiple_factor = 2
+        nn = Sequential(BatchNorm1d(dim),Linear(dim, dim*multiple_factor),LeakyReLU(inplace=True), \
+                        BatchNorm1d(dim*multiple_factor),Linear(dim*multiple_factor, dim))        
+        self.v_update =  Sequential(BatchNorm1d(dim*cat_factor),
+                                    Linear(dim*cat_factor,dim*cat_factor*multiple_factor),
+                                    LeakyReLU(inplace=True),
+                                    BatchNorm1d(dim*cat_factor*multiple_factor),
+                                    Linear(dim*cat_factor*multiple_factor,dim))
+        self.e_update = Sequential( BatchNorm1d(dim*cat_factor),
+                                    Linear(dim*cat_factor,dim*cat_factor*multiple_factor),
+                                    BatchNorm1d(dim*cat_factor*multiple_factor),
+                                    LeakyReLU(inplace=True),
+                                    Linear(dim*cat_factor*multiple_factor,dim))        
+        self.conv = MEGNet2(dim,nn,aggr=aggr)
+    
+    def forward(self, x, edge_index, edge_attr):
+        x_new,edge_new = self.conv(x, edge_index, edge_attr)
+        x_new = self.v_update(x_new)
+        edge_new = self.e_update(edge_new)
+        return x+x_new,edge_attr+edge_new
+    
+    def __repr__(self):
+        return 'MEGNet_block2'     
+    
+class MEGNet_block3(torch.nn.Module):
+    def __init__(self,dim,aggr='mean'):
+        super(MEGNet_block3, self).__init__()
+        cat_factor = 1
+        multiple_factor = 2
+        nn = Sequential(BatchNorm1d(dim),Linear(dim, dim*dim))       
+        self.v_update =  Sequential(BatchNorm1d(dim*cat_factor),
+                                    Linear(dim*cat_factor,dim*cat_factor*multiple_factor),
+                                    LeakyReLU(inplace=True),
+                                    BatchNorm1d(dim*cat_factor*multiple_factor),
+                                    Linear(dim*cat_factor*multiple_factor,dim))
+        self.e_update = Sequential( BatchNorm1d(dim*cat_factor),
+                                    Linear(dim*cat_factor,dim*cat_factor*multiple_factor),
+                                    BatchNorm1d(dim*cat_factor*multiple_factor),
+                                    LeakyReLU(inplace=True),
+                                    Linear(dim*cat_factor*multiple_factor,dim))        
+        self.conv = MEGNet3(dim,nn,aggr=aggr)
+    
+    def forward(self, x, edge_index, edge_attr):
+        x_new,edge_new = self.conv(x, edge_index, edge_attr)
+        x_new = self.v_update(x_new)
+        edge_new = self.e_update(edge_new)
+        return x+x_new,edge_attr+edge_new
+    
+    def __repr__(self):
+        return 'MEGNet_block3'  
+
+
     
 '''------------------------------------------------------------------------------------------------------------------'''
 '''------------------------------------------------------ Main ------------------------------------------------------'''
@@ -1278,7 +1407,7 @@ class GlobalModel(UnitModel):
 
 
 class MetaLayer_block(torch.nn.Module):
-    def __init__(self,dim,BatchNorm=True,factor=2,useMax=False):
+    def __init__(self,dim,BatchNorm=True,factor=2,useMax=False,NodeModel=NodeModel):
         super(MetaLayer_block, self).__init__()
         if BatchNorm:
             self.v_update = Sequential(BatchNorm1d(dim),
@@ -1319,12 +1448,56 @@ class MetaLayer_block(torch.nn.Module):
         return x+x_new,edge_attr+edge_attr_new,u+u_new
     
     def __repr__(self):
-        return 'MetaLayer_block'   
+        return 'MetaLayer_block'      
+    
+class NodeModel2(UnitModel):
+    # add SchNet like node update
+    def __init__(self,dim,BatchNorm=True,factor=2,useMax=False):
+        super().__init__(dim,BatchNorm=BatchNorm,factor=factor,useMax=useMax)
+        self.nn = Sequential(BatchNorm1d(dim),Linear(dim, dim*factor),LeakyReLU(inplace=True), \
+                                BatchNorm1d(dim*factor),Linear(dim*factor, dim))    
+        
+    def forward(self, x, edge_index, edge_attr, u, batch):
+        # x: [N, F_x], where N is the number of nodes.
+        # edge_index: [2, E] with max entry N - 1.
+        # edge_attr: [E, F_e]
+        # u: [B, F_u]
+        # batch: [N] with max entry B - 1.
+        row, col = edge_index
+        out = x[col] * self.nn(edge_attr)
+        if self.useMax:
+            out,_ = scatter_max(out, row, dim=0, dim_size=x.size(0))
+        else:
+            out = scatter_mean(out, row, dim=0, dim_size=x.size(0))
+        out = torch.cat([x, out, u[batch]], dim=1)
+        return self._mlp(out)
+    
+class NodeModel3(UnitModel):
+    # add NNConv like node update
+    def __init__(self,dim,BatchNorm=True,factor=2,useMax=False):
+        super().__init__(dim,BatchNorm=BatchNorm,factor=factor,useMax=useMax)
+        self.nn = Sequential(BatchNorm1d(dim),Linear(dim, dim*dim))         
+        
+    def forward(self, x, edge_index, edge_attr, u, batch):
+        # x: [N, F_x], where N is the number of nodes.
+        # edge_index: [2, E] with max entry N - 1.
+        # edge_attr: [E, F_e]
+        # u: [B, F_u]
+        # batch: [N] with max entry B - 1.
+        row, col = edge_index
+        out = torch.einsum('np,npq->nq',x[col],self.nn(edge_attr))
+        if self.useMax:
+            out,_ = scatter_max(out, row, dim=0, dim_size=x.size(0))
+        else:
+            out = scatter_mean(out, row, dim=0, dim_size=x.size(0))
+        out = torch.cat([x, out, u[batch]], dim=1)
+        return self._mlp(out)  
 
 class GNN_MataLayer(torch.nn.Module):
     # for MEGNet only
     def __init__(self,head,head_mol,head_atom,head_edge,dim,layer1,layer2,factor,\
-                 node_in,edge_in,edge_in4,edge_in3=8,mol_shape=4,atom_shape=10,edge_shape=4,BatchNorm=True,useMax=False,interleave=False,u_shape=None):
+                 node_in,edge_in,edge_in4,edge_in3=8,mol_shape=4,atom_shape=10,edge_shape=4,\
+                 BatchNorm=True,useMax=False,interleave=False,u_shape=None,NodeModel=NodeModel):
         # block,head are nn.Module
         # node_in,edge_in are dim for bonding and edge_in4,edge_in3 for coupling
         super(GNN_MataLayer, self).__init__()
@@ -1349,8 +1522,8 @@ class GNN_MataLayer(torch.nn.Module):
             self.u_mlp = Sequential(BatchNorm1d(u_shape),Linear(u_shape, dim*factor),LeakyReLU(), \
                                        BatchNorm1d(dim*factor),Linear(dim*factor, dim),LeakyReLU())
         
-        self.conv1 = nn.ModuleList([MetaLayer_block(dim,BatchNorm=BatchNorm,factor=factor,useMax=useMax) for _ in range(layer1)])
-        self.conv2 = nn.ModuleList([MetaLayer_block(dim,BatchNorm=BatchNorm,factor=factor,useMax=useMax) for _ in range(layer2)])            
+        self.conv1 = nn.ModuleList([MetaLayer_block(dim,BatchNorm=BatchNorm,factor=factor,useMax=useMax,NodeModel=NodeModel) for _ in range(layer1)])
+        self.conv2 = nn.ModuleList([MetaLayer_block(dim,BatchNorm=BatchNorm,factor=factor,useMax=useMax,NodeModel=NodeModel) for _ in range(layer2)])            
         
         self.head = head(dim)
         self.head_mol = head_mol(dim,mol_shape)
@@ -1425,7 +1598,7 @@ class GNN_MataLayer(torch.nn.Module):
                 loss_perType[nonzeroIndex] = torch.log(loss_perType[nonzeroIndex])
                 return loss+loss_other,loss_perType
         else:
-            return yhat
+            return yhat 
 
 
 class GNN_multiHead_noEdge_Dense(torch.nn.Module):
