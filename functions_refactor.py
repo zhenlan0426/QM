@@ -1250,64 +1250,6 @@ class GNN_multiHead_interleave(torch.nn.Module):
             return yhat
 
 
-class GNN_multiHead_interleave_stacking(torch.nn.Module):
-    def __init__(self,reuse,block,head,dim,layer,factor,\
-                 edge_in4,edge_in3=8,aggr='mean'):
-        # block,head are nn.Module
-        # node_in,edge_in are dim for bonding and edge_in4,edge_in3 for coupling
-        super(GNN_multiHead_interleave_stacking, self).__init__()
-       
-        if reuse:
-            self.conv = block(dim=dim,aggr=aggr)
-        else:
-            self.conv = nn.ModuleList([block(dim=dim,aggr=aggr) for _ in range(layer)])        
-        self.head = head(dim)
-        
-        
-    def forward(self, data,IsTrain=False,typeTrain=False,logLoss=True,weight=None):
-        out = data.x
-        # edge_*3 only does not repeat for undirected graph. Hence need to add (j,i) to (i,j) in edges
-        edge_index3 = torch.cat([data.edge_index3,data.edge_index3[[1,0]]],1)
-        n = data.edge_attr3.shape[0]
-        edge_attr3 = torch.cat([data.edge_attr4,data.edge_attr4],0)
-          
-        for conv in self.conv:
-            out,edge_attr3 = conv(out,edge_index3,edge_attr3)
-
-        
-        edge_attr3 = edge_attr3[:n]
-
-        if typeTrain:
-            if IsTrain:
-                y = data.y[data.type_attr]
-            edge_attr3 = edge_attr3[data.type_attr]
-            edge_index3 = data.edge_index3[:,data.type_attr]
-            edge_attr3_old = data.edge_attr3[data.type_attr]
-        else:
-            if IsTrain:
-                y = data.y
-            edge_index3 = data.edge_index3
-            edge_attr3_old = data.edge_attr3
-            
-        yhat = self.head(out,edge_index3,edge_attr3,edge_attr3_old)
-        
-        if IsTrain:
-            k = torch.sum(edge_attr3_old,0)
-            nonzeroIndex = torch.nonzero(k).squeeze(1)
-            abs_ = torch.abs(y-yhat).unsqueeze(1)
-            loss_perType = torch.zeros(8,device='cuda:0')
-            if logLoss:
-                loss_perType[nonzeroIndex] = torch.log(torch.sum(abs_ * edge_attr3_old[:,nonzeroIndex],0)/k[nonzeroIndex])
-                loss = torch.sum(loss_perType)/nonzeroIndex.shape[0]
-                return loss,loss_perType         
-            else:
-                loss_perType[nonzeroIndex] = torch.sum(abs_ * edge_attr3_old[:,nonzeroIndex],0)/k[nonzeroIndex]
-                loss = torch.sum(loss_perType)/nonzeroIndex.shape[0]
-                loss_perType[nonzeroIndex] = torch.log(loss_perType[nonzeroIndex])
-                return loss,loss_perType
-        else:
-            return yhat
-
 class GNN_multiHead_noEdge(torch.nn.Module):
     # no edge update
     def __init__(self,reuse,block,head,head_mol,head_atom,head_edge,dim,layer1,layer2,factor,\
