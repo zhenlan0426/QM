@@ -1263,7 +1263,8 @@ class GNN_multiHead_interleave_stacking(torch.nn.Module):
             self.conv = nn.ModuleList([block(dim=dim,aggr=aggr) for _ in range(layer)])        
         self.head = head(dim)
         
-    def forward(self, data,IsTrain=False,logLoss=True,typeTrain=False,weight=None):
+        
+    def forward(self, data,IsTrain=False,typeTrain=False,logLoss=True,weight=None):
         out = data.x
         # edge_*3 only does not repeat for undirected graph. Hence need to add (j,i) to (i,j) in edges
         edge_index3 = torch.cat([data.edge_index3,data.edge_index3[[1,0]]],1)
