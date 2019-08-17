@@ -1249,6 +1249,64 @@ class GNN_multiHead_interleave(torch.nn.Module):
         else:
             return yhat
 
+
+class GNN_multiHead_interleave_stacking(torch.nn.Module):
+    def __init__(self,reuse,block,head,dim,layer,factor,\
+                 edge_in4,edge_in3=8,aggr='mean'):
+        # block,head are nn.Module
+        # node_in,edge_in are dim for bonding and edge_in4,edge_in3 for coupling
+        super(GNN_multiHead_interleave_stacking, self).__init__()
+       
+        if reuse:
+            self.conv = block(dim=dim,aggr=aggr)
+        else:
+            self.conv = nn.ModuleList([block(dim=dim,aggr=aggr) for _ in range(layer)])        
+        self.head = head(dim)
+        
+    def forward(self, data,IsTrain=False,logLoss=True,typeTrain=False,weight=None):
+        out = data.x
+        # edge_*3 only does not repeat for undirected graph. Hence need to add (j,i) to (i,j) in edges
+        edge_index3 = torch.cat([data.edge_index3,data.edge_index3[[1,0]]],1)
+        n = data.edge_attr3.shape[0]
+        edge_attr3 = torch.cat([data.edge_attr4,data.edge_attr4],0)
+          
+        for conv in self.conv:
+            out,edge_attr3 = conv(out,edge_index3,edge_attr3)
+
+        
+        edge_attr3 = edge_attr3[:n]
+
+        if typeTrain:
+            if IsTrain:
+                y = data.y[data.type_attr]
+            edge_attr3 = edge_attr3[data.type_attr]
+            edge_index3 = data.edge_index3[:,data.type_attr]
+            edge_attr3_old = data.edge_attr3[data.type_attr]
+        else:
+            if IsTrain:
+                y = data.y
+            edge_index3 = data.edge_index3
+            edge_attr3_old = data.edge_attr3
+            
+        yhat = self.head(out,edge_index3,edge_attr3,edge_attr3_old)
+        
+        if IsTrain:
+            k = torch.sum(edge_attr3_old,0)
+            nonzeroIndex = torch.nonzero(k).squeeze(1)
+            abs_ = torch.abs(y-yhat).unsqueeze(1)
+            loss_perType = torch.zeros(8,device='cuda:0')
+            if logLoss:
+                loss_perType[nonzeroIndex] = torch.log(torch.sum(abs_ * edge_attr3_old[:,nonzeroIndex],0)/k[nonzeroIndex])
+                loss = torch.sum(loss_perType)/nonzeroIndex.shape[0]
+                return loss,loss_perType         
+            else:
+                loss_perType[nonzeroIndex] = torch.sum(abs_ * edge_attr3_old[:,nonzeroIndex],0)/k[nonzeroIndex]
+                loss = torch.sum(loss_perType)/nonzeroIndex.shape[0]
+                loss_perType[nonzeroIndex] = torch.log(loss_perType[nonzeroIndex])
+                return loss,loss_perType
+        else:
+            return yhat
+
 class GNN_multiHead_noEdge(torch.nn.Module):
     # no edge update
     def __init__(self,reuse,block,head,head_mol,head_atom,head_edge,dim,layer1,layer2,factor,\
@@ -2490,3 +2548,151 @@ def average_submission(lol,submission,name='combine_type.csv'):
     submission = submission[['id','scalar_coupling_constant']]
     submission['scalar_coupling_constant'] = temp
     submission.to_csv('../Submission/'+name,index=False)      
+    
+    
+
+import torch
+from torch.optim.optimizer import Optimizer
+
+class RAdam(Optimizer):
+
+    def __init__(self, params, lr=1e-3, betas=(0.9, 0.999), eps=1e-8, weight_decay=0):
+        defaults = dict(lr=lr, betas=betas, eps=eps, weight_decay=weight_decay)
+        self.buffer = [[None, None, None] for ind in range(10)]
+        super(RAdam, self).__init__(params, defaults)
+
+    def __setstate__(self, state):
+        super(RAdam, self).__setstate__(state)
+
+    def step(self, closure=None):
+
+        loss = None
+        if closure is not None:
+            loss = closure()
+
+        for group in self.param_groups:
+
+            for p in group['params']:
+                if p.grad is None:
+                    continue
+                grad = p.grad.data.float()
+                if grad.is_sparse:
+                    raise RuntimeError('RAdam does not support sparse gradients')
+
+                p_data_fp32 = p.data.float()
+
+                state = self.state[p]
+
+                if len(state) == 0:
+                    state['step'] = 0
+                    state['exp_avg'] = torch.zeros_like(p_data_fp32)
+                    state['exp_avg_sq'] = torch.zeros_like(p_data_fp32)
+                else:
+                    state['exp_avg'] = state['exp_avg'].type_as(p_data_fp32)
+                    state['exp_avg_sq'] = state['exp_avg_sq'].type_as(p_data_fp32)
+
+                exp_avg, exp_avg_sq = state['exp_avg'], state['exp_avg_sq']
+                beta1, beta2 = group['betas']
+
+                exp_avg_sq.mul_(beta2).addcmul_(1 - beta2, grad, grad)
+                exp_avg.mul_(beta1).add_(1 - beta1, grad)
+
+                state['step'] += 1
+                buffered = self.buffer[int(state['step'] % 10)]
+                if state['step'] == buffered[0]:
+                    N_sma, step_size = buffered[1], buffered[2]
+                else:
+                    buffered[0] = state['step']
+                    beta2_t = beta2 ** state['step']
+                    N_sma_max = 2 / (1 - beta2) - 1
+                    N_sma = N_sma_max - 2 * state['step'] * beta2_t / (1 - beta2_t)
+                    buffered[1] = N_sma
+
+                    # more conservative since it's an approximated value
+                    if N_sma >= 5:
+                        step_size = group['lr'] * math.sqrt((1 - beta2_t) * (N_sma - 4) / (N_sma_max - 4) * (N_sma - 2) / N_sma * N_sma_max / (N_sma_max - 2)) / (1 - beta1 ** state['step'])
+                    else:
+                        step_size = group['lr'] / (1 - beta1 ** state['step'])
+                    buffered[2] = step_size
+
+                if group['weight_decay'] != 0:
+                    p_data_fp32.add_(-group['weight_decay'] * group['lr'], p_data_fp32)
+
+                # more conservative since it's an approximated value
+                if N_sma >= 5:                    
+                    denom = exp_avg_sq.sqrt().add_(group['eps'])
+                    p_data_fp32.addcdiv_(-step_size, exp_avg, denom)
+                else:
+                    p_data_fp32.add_(-step_size, exp_avg)
+
+                p.data.copy_(p_data_fp32)
+
+        return loss
+    
+class AdamW(Optimizer):
+
+    def __init__(self, params, lr=1e-3, betas=(0.9, 0.999), eps=1e-8,
+                 weight_decay=0, use_variance=True, warmup = 4000):
+        defaults = dict(lr=lr, betas=betas, eps=eps,
+                        weight_decay=weight_decay, use_variance=True, warmup = warmup)
+        print('======== Warmup: {} ========='.format(warmup))
+        super(AdamW, self).__init__(params, defaults)
+
+    def __setstate__(self, state):
+        super(AdamW, self).__setstate__(state)
+
+    def step(self, closure=None):
+        global iter_idx
+        iter_idx += 1
+
+        loss = None
+        if closure is not None:
+            loss = closure()
+
+        for group in self.param_groups:
+
+            for p in group['params']:
+                if p.grad is None:
+                    continue
+                grad = p.grad.data.float()
+                if grad.is_sparse:
+                    raise RuntimeError('Adam does not support sparse gradients, please consider SparseAdam instead')
+
+                p_data_fp32 = p.data.float()
+
+                state = self.state[p]
+
+                if len(state) == 0:
+                    state['step'] = 0
+                    state['exp_avg'] = torch.zeros_like(p_data_fp32)
+                    state['exp_avg_sq'] = torch.zeros_like(p_data_fp32)
+                else:
+                    state['exp_avg'] = state['exp_avg'].type_as(p_data_fp32)
+                    state['exp_avg_sq'] = state['exp_avg_sq'].type_as(p_data_fp32)
+
+                exp_avg, exp_avg_sq = state['exp_avg'], state['exp_avg_sq']
+                beta1, beta2 = group['betas']
+
+                state['step'] += 1
+
+                exp_avg_sq.mul_(beta2).addcmul_(1 - beta2, grad, grad)
+                exp_avg.mul_(beta1).add_(1 - beta1, grad)
+
+                denom = exp_avg_sq.sqrt().add_(group['eps'])
+                bias_correction1 = 1 - beta1 ** state['step']
+                bias_correction2 = 1 - beta2 ** state['step']
+                
+                if group['warmup'] > state['step']:
+                    scheduled_lr = 1e-6 + state['step'] * (group['lr'] - 1e-6) / group['warmup']
+                else:
+                    scheduled_lr = group['lr']
+
+                step_size = scheduled_lr * math.sqrt(bias_correction2) / bias_correction1
+                if group['weight_decay'] != 0:
+                    p_data_fp32.add_(-group['weight_decay'] * scheduled_lr, p_data_fp32)
+
+                p_data_fp32.addcdiv_(-step_size, exp_avg, denom)
+
+                p.data.copy_(p_data_fp32)
+
+        return loss
