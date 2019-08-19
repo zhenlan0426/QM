@@ -791,7 +791,7 @@ class MEGNet_Int2(MessagePassing_edgeUpdate):
     def message(self, x_i, x_j, edge_attr,int_types):
         # int_types (n,k)
         out = self.e_update(torch.cat([x_i+x_j,edge_attr,int_types],1)).reshape(-1,self.dim,self.type_factor)
-        out = out[int_types].reshape(-1,self.type_factor)
+        out = out[int_types].reshape(-1,self.dim)
         return out,out
 
     def update(self, aggr_out, x):
@@ -828,7 +828,7 @@ class MEGNet_Interaction_block2(torch.nn.Module):
         x_new,edge_new = self.conv(x, edge_index, edge_attr,int_types)
         x_new = self.v_update(x_new)
         edge_new = self.e_update(torch.cat([edge_new,int_types],1)).reshape(-1,self.dim,self.type_factor)
-        edge_new = edge_new[int_types].reshape(-1,self.type_factor)        
+        edge_new = edge_new[int_types].reshape(-1,self.dim)        
         return x+x_new,edge_attr+edge_new
     
     def __repr__(self):
