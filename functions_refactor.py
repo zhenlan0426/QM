@@ -763,6 +763,76 @@ class MEGNet_Interaction_block(torch.nn.Module):
     def __repr__(self):
         return 'MEGNet__Interaction_block'    
 
+class MEGNet_Int2(MessagePassing_edgeUpdate):
+    def __init__(self,dim,aggr='mean'):
+        super(MEGNet_Int2, self).__init__(aggr=aggr)
+        cat_factor = 2
+        multiple_factor = 3
+        type_factor = 8
+        self.dim = dim
+        self.type_factor = type_factor
+        self.v_update = Sequential(BatchNorm1d(dim*cat_factor),
+                                    Linear(dim*cat_factor,dim*cat_factor*multiple_factor),
+                                    LeakyReLU(inplace=True),
+                                    BatchNorm1d(dim*cat_factor*multiple_factor),
+                                    Linear(dim*cat_factor*multiple_factor,dim),
+                                    LeakyReLU(inplace=True))
+        
+        self.e_update = Sequential(BatchNorm1d(dim*cat_factor+type_factor),
+                                    Linear(dim*cat_factor+type_factor,dim*cat_factor*multiple_factor),
+                                    LeakyReLU(inplace=True),
+                                    BatchNorm1d(dim*cat_factor*multiple_factor),
+                                    Linear(dim*cat_factor*multiple_factor,dim*type_factor),
+                                    LeakyReLU(inplace=True))
+
+    def forward(self, x, edge_index, edge_attr,int_types):
+        return self.propagate(edge_index, x=x, edge_attr=edge_attr,int_types=int_types)
+
+    def message(self, x_i, x_j, edge_attr,int_types):
+        # int_types (n,k)
+        out = self.e_update(torch.cat([x_i+x_j,edge_attr,int_types],1)).reshape(-1,self.dim,self.type_factor)
+        out = out[int_types].reshape(-1,self.type_factor)
+        return out,out
+
+    def update(self, aggr_out, x):
+        return self.v_update(torch.cat([aggr_out,x],1))
+
+    def __repr__(self):
+        return 'MEGNet_Int2'
+    
+class MEGNet_Interaction_block2(torch.nn.Module):
+    # allow for more interaction with type
+    def __init__(self,dim,aggr='mean'):
+        super(MEGNet_Interaction_block2, self).__init__()
+        cat_factor = 1
+        multiple_factor = 3 
+        type_factor = 8
+        self.type_factor = type_factor
+        self.dim = dim
+        self.v_update =  Sequential(BatchNorm1d(dim*cat_factor),
+                                    Linear(dim*cat_factor,dim*cat_factor*multiple_factor),
+                                    LeakyReLU(inplace=True),
+                                    BatchNorm1d(dim*cat_factor*multiple_factor),
+                                    Linear(dim*cat_factor*multiple_factor,dim))
+        self.e_update = Sequential( BatchNorm1d(dim*cat_factor+8),
+                                    Linear(dim*cat_factor+8,dim*cat_factor*multiple_factor),
+                                    BatchNorm1d(dim*cat_factor*multiple_factor),
+                                    LeakyReLU(inplace=True),
+                                    Linear(dim*cat_factor*multiple_factor,dim*type_factor))        
+        self.conv = MEGNet_Int2(dim,aggr=aggr)
+    
+    def forward(self, x, edge_index, edge_attr,int_types):
+        int_types=int_types.unsqueeze(1).to(torch.bool)
+        _,int_types = torch.broadcast_tensors(edge_new,int_types)
+        
+        x_new,edge_new = self.conv(x, edge_index, edge_attr,int_types)
+        x_new = self.v_update(x_new)
+        edge_new = self.e_update(torch.cat([edge_new,int_types],1)).reshape(-1,self.dim,self.type_factor)
+        edge_new = edge_new[int_types].reshape(-1,self.type_factor)        
+        return x+x_new,edge_attr+edge_new
+    
+    def __repr__(self):
+        return 'MEGNet__Interaction_block2'    
 
 class schnet_block_Dense(torch.nn.Module):
     # use both types of edges
