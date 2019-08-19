@@ -791,6 +791,8 @@ class MEGNet_Int2(MessagePassing_edgeUpdate):
     def message(self, x_i, x_j, edge_attr,int_types):
         # int_types (n,k)
         out = self.e_update(torch.cat([x_i+x_j,edge_attr,int_types],1)).reshape(-1,self.dim,self.type_factor)
+        int_types=int_types.unsqueeze(1).to(torch.bool)
+        _,int_types = torch.broadcast_tensors(out,int_types)       
         out = out[int_types].reshape(-1,self.dim)
         return out,out
 
@@ -821,13 +823,12 @@ class MEGNet_Interaction_block2(torch.nn.Module):
                                     Linear(dim*cat_factor*multiple_factor,dim*type_factor))        
         self.conv = MEGNet_Int2(dim,aggr=aggr)
     
-    def forward(self, x, edge_index, edge_attr,int_types):
-        int_types=int_types.unsqueeze(1).to(torch.bool)
-        _,int_types = torch.broadcast_tensors(edge_new,int_types)
-        
+    def forward(self, x, edge_index, edge_attr,int_types):      
         x_new,edge_new = self.conv(x, edge_index, edge_attr,int_types)
         x_new = self.v_update(x_new)
         edge_new = self.e_update(torch.cat([edge_new,int_types],1)).reshape(-1,self.dim,self.type_factor)
+        int_types=int_types.unsqueeze(1).to(torch.bool)
+        _,int_types = torch.broadcast_tensors(edge_new,int_types)            
         edge_new = edge_new[int_types].reshape(-1,self.dim)        
         return x+x_new,edge_attr+edge_new
     
