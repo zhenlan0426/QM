@@ -113,9 +113,66 @@ class CNN(nn.Module):
         x = self.fc_layer(x)
         return x
 
+class CNN2(nn.Module):
+    """CNN."""
+
+    def __init__(self):
+        """CNN Builder."""
+        super(CNN2, self).__init__()
+
+        self.conv_layer = nn.Sequential(
+
+            # Conv Layer block 1
+            nn.Conv2d(in_channels=5, out_channels=32, kernel_size=5),
+            nn.BatchNorm2d(32),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(in_channels=32, out_channels=64, kernel_size=5),
+            nn.BatchNorm2d(64),
+            nn.ReLU(inplace=True),
+            #nn.MaxPool2d(kernel_size=3, stride=2),
+
+            # Conv Layer block 2
+            nn.Conv2d(in_channels=64, out_channels=128, kernel_size=5),
+            nn.BatchNorm2d(128),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(in_channels=128, out_channels=128, kernel_size=5),
+            nn.BatchNorm2d(128),
+            nn.ReLU(inplace=True),
+            #nn.MaxPool2d(kernel_size=3, stride=2),
+            #nn.Dropout2d(p=0.05),
+
+            # Conv Layer block 3
+            nn.Conv2d(in_channels=128, out_channels=256, kernel_size=5),
+            nn.BatchNorm2d(256),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(in_channels=256, out_channels=256, kernel_size=5),
+            nn.BatchNorm2d(256),
+            nn.ReLU(inplace=True),
+            #nn.MaxPool2d(kernel_size=3, stride=2),
+        )
+
+        self.linear = nn.Sequential(nn.Linear(256, 512),
+                                    nn.ReLU(inplace=True),
+                                    nn.Linear(512,1),
+                                    nn.ReLU(inplace=True),
+                                    )
+        
+        self.fc_layer = nn.Sequential(nn.Linear(121, 512),
+                                    nn.ReLU(inplace=True),
+                                    nn.Linear(512,1),
+                                    )
+
+
+    def forward(self, x):
+        n = x.shape[0]
+        x = self.conv_layer(x).transpose(1,3)
+        x = self.linear(x).reshape(n,-1)
+        x = self.fc_layer(x)
+        return x
+
 def train_cnn(model,optimizer,train_loader,valid_loader,n_epochs,clip,scheduler):
     start_time = time.time()
-    criterion = nn.SmoothL1Loss()
+    criterion = nn.L1Loss()
 
     valid_loss_min = np.Inf # track change in validation loss
     for epoch in range(1, n_epochs+1):
