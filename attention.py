@@ -25,6 +25,9 @@ class attentionDataset(Dataset):
             return self.node[idx],self.edge[idx],self.y[idx]
         
 def collate_fn(batch):
+    # batch is a list of things returned by __getitem__.
+    # e.g. in this case a list of tuple of three element
+    # this function should return a batch of data
     if len(batch[0]) == 3:
         node,edge,y = zip(*batch)
     else:
