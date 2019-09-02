@@ -104,6 +104,31 @@ def kaiming_uniform_(tensor, a=0, mode='fan_in', nonlinearity='relu'):
     with torch.no_grad():
         return tensor.uniform_(-bound, bound)
 
+class TransformerEncoderLayer_BN(torch.nn.Module):
+    # use BatchNorm instead of LayerNorm
+    def __init__(self, d_model, nhead, dim_feedforward=1024, dropout=0.1):
+        super(TransformerEncoderLayer_BN, self).__init__()
+        self.self_attn = MultiheadAttention(d_model, nhead, dropout=dropout)
+        # Implementation of Feedforward model
+        self.linear1 = Linear(d_model, dim_feedforward)
+        self.dropout = Dropout(dropout)
+        self.linear2 = Linear(dim_feedforward, d_model)
+
+        self.norm1 = BatchNorm1d(d_model)
+        self.norm2 = BatchNorm1d(d_model)
+        self.dropout1 = Dropout(dropout)
+        self.dropout2 = Dropout(dropout)
+
+    def forward(self, src, src_mask=None, src_key_padding_mask=None):
+        src2 = self.self_attn(src, src, src, attn_mask=src_mask,
+                              key_padding_mask=src_key_padding_mask)[0]
+        src = src + self.dropout1(src2)
+        src = self.norm1(src.transpose(1,2)).transpose(1,2)
+        src2 = self.linear2(self.dropout(F.relu(self.linear1(src))))
+        src = src + self.dropout2(src2)
+        src = self.norm2(src.transpose(1,2)).transpose(1,2)
+        return src
+    
 class TransformerDecoderLayer(torch.nn.Module):
 
     def __init__(self, d_model, nhead, dim_feedforward=1024, dropout=0.1):
@@ -133,30 +158,62 @@ class TransformerDecoderLayer(torch.nn.Module):
         tgt = tgt + self.dropout3(tgt2)
         tgt = self.norm3(tgt)
         return tgt
+
+
+class TransformerDecoderLayer_BN(torch.nn.Module):
+    # use BatchNorm instead of LayerNorm
+    def __init__(self, d_model, nhead, dim_feedforward=1024, dropout=0.1):
+        super(TransformerDecoderLayer_BN, self).__init__()
+
+        self.multihead_attn = MultiheadAttention(d_model, nhead, dropout=dropout)
+        # Implementation of Feedforward model
+        self.linear1 = Linear(d_model, dim_feedforward)
+        self.dropout = Dropout(dropout)
+        self.linear2 = Linear(dim_feedforward, d_model)
+
+        self.norm2 = BatchNorm1d(d_model)
+        self.norm3 = BatchNorm1d(d_model)
+
+        self.dropout2 = Dropout(dropout)
+        self.dropout3 = Dropout(dropout)
+
+    def forward(self, tgt, memory, tgt_mask=None, memory_mask=None,
+                tgt_key_padding_mask=None, memory_key_padding_mask=None):
+       
+        tgt2 = self.multihead_attn(tgt, memory, memory, attn_mask=memory_mask,
+                                   key_padding_mask=memory_key_padding_mask)[0]
+        tgt = tgt + self.dropout2(tgt2)
+        tgt = self.norm2(tgt.transpose(1,2)).transpose(1,2)
+        tgt2 = self.linear2(self.dropout(F.relu(self.linear1(tgt))))
+        tgt = tgt + self.dropout3(tgt2)
+        tgt = self.norm3(tgt.transpose(1,2)).transpose(1,2)
+        return tgt
     
 class Attention(torch.nn.Module):
-    # for MEGNet only
-    def __init__(self,dim,encoder_layer,decoder_layer,head_d,head,node_d=8,edge_d=9,dropout=0.1,dim_feedforward=1024):
-        # block,head are nn.Module
-        # node_in,edge_in are dim for bonding and edge_in4,edge_in3 for coupling
+    def __init__(self,dim,encoder_layer,decoder_layer,head_d,head,EncoderLayer,DecoderLayer,\
+                 node_d=8,edge_d=9,dropout=0.1,dim_feedforward=1024):
         super(Attention, self).__init__()
-        self.lin_node = Sequential(LayerNorm(node_d),Linear(node_d, dim))
-        self.lin_edge = Sequential(LayerNorm(edge_d),Linear(edge_d, dim))
-        self.encoder_layers = nn.ModuleList([TransformerEncoderLayer(dim,head_d,dim_feedforward=dim_feedforward,dropout=dropout) for _ in range(encoder_layer)])
-        self.decoder_layers = nn.ModuleList([TransformerDecoderLayer(dim,head_d,dim_feedforward=dim_feedforward,dropout=dropout) for _ in range(decoder_layer)])
+#        self.lin_node = Sequential(LayerNorm(node_d),Linear(node_d, dim))
+#        self.lin_edge = Sequential(LayerNorm(edge_d),Linear(edge_d, dim))
+        self.lin_node = Linear(node_d, dim)
+        self.lin_edge = Linear(edge_d, dim)
+        self.norm_node = BatchNorm1d(node_d)
+        self.norm_edge = BatchNorm1d(edge_d)
+        self.encoder_layers = nn.ModuleList([EncoderLayer(dim,head_d,dim_feedforward=dim_feedforward,dropout=dropout) for _ in range(encoder_layer)])
+        self.decoder_layers = nn.ModuleList([DecoderLayer(dim,head_d,dim_feedforward=dim_feedforward,dropout=dropout) for _ in range(decoder_layer)])
         self.norm = BatchNorm1d(dim)
         self.head = head(dim)
-        self._reset_parameters()
-
-    def _reset_parameters(self):
-        r"""Initiate parameters in the transformer model."""
-        for p in self.parameters():
-            if p.dim() > 1:
-                xavier_uniform_(p)
+#        self._reset_parameters()
+#
+#    def _reset_parameters(self):
+#        r"""Initiate parameters in the transformer model."""
+#        for p in self.parameters():
+#            if p.dim() > 1:
+#                xavier_uniform_(p)
 
     def forward(self, out,mask,edge,y=None,logLoss=True):
-        out = self.lin_node(out)
-        edge2 = self.lin_edge(edge)
+        out = self.lin_node(self.norm_node(out.transpose(1,2)).transpose(1,2))
+        edge2 = self.lin_edge(self.norm_edge(edge.transpose(1,2)).transpose(1,2))
 
         for f in self.encoder_layers:
             out = f(out,src_key_padding_mask=mask)
@@ -165,6 +222,48 @@ class Attention(torch.nn.Module):
             edge2 = f(edge2, out,memory_key_padding_mask=mask)
             
         edge2 = self.norm(edge2.squeeze(0))
+        #edge2 = edge2.squeeze(0)
+        edge_attr3_old = edge.squeeze(0)[:,:8]
+        yhat = self.head(edge2,edge_attr3_old)
+        
+        if y is None:
+            return yhat
+        else:
+            k = torch.sum(edge_attr3_old,0)
+            nonzeroIndex = torch.nonzero(k).squeeze(1)
+            abs_ = torch.abs(y-yhat).unsqueeze(1)
+            loss_perType = torch.zeros(8,device='cuda:0')
+            if logLoss:
+                loss_perType[nonzeroIndex] = torch.log(torch.sum(abs_ * edge_attr3_old[:,nonzeroIndex],0)/k[nonzeroIndex])
+                loss = torch.sum(loss_perType)/nonzeroIndex.shape[0]
+                return loss,loss_perType         
+            else:
+                loss_perType[nonzeroIndex] = torch.sum(abs_ * edge_attr3_old[:,nonzeroIndex],0)/k[nonzeroIndex]
+                loss = torch.sum(loss_perType)/nonzeroIndex.shape[0]
+                loss_perType[nonzeroIndex] = torch.log(loss_perType[nonzeroIndex])
+                return loss,loss_perType
+            
+            
+class Attention2(torch.nn.Module):
+    # no decoder.
+    def __init__(self,dim,encoder_layer,head_d,head,EncoderLayer,\
+                 node_d=8,edge_d=9,dropout=0.1,dim_feedforward=1024):
+        super(Attention2, self).__init__()
+        self.lin_node = Linear(node_d+edge_d, dim)
+        self.norm_node = BatchNorm1d(node_d+edge_d)
+        self.encoder_layers = nn.ModuleList([EncoderLayer(dim,head_d,dim_feedforward=dim_feedforward,dropout=dropout) for _ in range(encoder_layer)])
+        self.norm = BatchNorm1d(dim)
+        self.head = head(dim)
+
+    def forward(self, out,mask,edge,y=None,logLoss=True):
+        edge_bc = torch.repeat_interleave(edge,out.shape[0],0)
+        out = torch.cat([out,edge_bc],2)
+        out = self.lin_node(self.norm_node(out.transpose(1,2)).transpose(1,2))
+
+        for f in self.encoder_layers:
+            out = f(out,src_key_padding_mask=mask)
+            
+        edge2 = self.norm(out.max(0)[0])
         #edge2 = edge2.squeeze(0)
         edge_attr3_old = edge.squeeze(0)[:,:8]
         yhat = self.head(edge2,edge_attr3_old)
