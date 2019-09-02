@@ -3359,7 +3359,6 @@ def average_submission(lol,submission,name='combine_type.csv'):
     
     
 
-import torch
 from torch.optim.optimizer import Optimizer
 
 class RAdam(Optimizer):
