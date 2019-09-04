@@ -231,7 +231,7 @@ class TransformerDecoderLayer_BN(torch.nn.Module):
     
 class Attention(torch.nn.Module):
     def __init__(self,dim,encoder_layer,decoder_layer,head_d,head,EncoderLayer,DecoderLayer,\
-                 node_d=8,edge_d=9,dropout=0.1,dim_feedforward=1024):
+                 node_d=8+1,edge_d=9+29,dropout=0.1,dim_feedforward=1024):
         super(Attention, self).__init__()
 #        self.lin_node = Sequential(LayerNorm(node_d),Linear(node_d, dim))
 #        self.lin_edge = Sequential(LayerNorm(edge_d),Linear(edge_d, dim))
