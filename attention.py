@@ -13,7 +13,7 @@ from torch import nn
 import torch.nn.functional as F
 from torch.nn import init
 from torch.nn.utils import clip_grad_value_
-from torch.nn.init import xavier_uniform_
+#from torch.nn.init import xavier_uniform_
 
 import math
 import time
@@ -24,10 +24,37 @@ import copy
 '''------------------------------------------------------ Data ------------------------------------------------------'''
 '''------------------------------------------------------------------------------------------------------------------'''
 
+#class attentionDataset(Dataset):
+#    def __init__(self, node, edge, y=None):
+#        self.node = node # a list
+#        self.edge = edge
+#        self.y = y
+#
+#    def __len__(self):
+#        return len(self.node)
+#
+#    def __getitem__(self, idx):
+#        if self.y is None:
+#            return self.node[idx],self.edge[idx]
+#        else:
+#            return self.node[idx],self.edge[idx],self.y[idx]
+#        
+#def collate_fn(batch):
+#    if len(batch[0]) == 3:
+#        node,edge,y = zip(*batch)
+#    else:
+#        node,edge = zip(*batch)
+#    out = torch.nn.utils.rnn.pad_sequence(node)
+#    mask = (out==0).all(2).T
+#    edge = torch.stack(edge)[None,:,:]
+#    y = torch.stack(y)
+#    return out,mask,edge,y    
+
 class attentionDataset(Dataset):
-    def __init__(self, node, edge, y=None):
+    def __init__(self, node, edge, ind, y=None):
         self.node = node # a list
         self.edge = edge
+        self.ind = ind
         self.y = y
 
     def __len__(self):
@@ -35,21 +62,34 @@ class attentionDataset(Dataset):
 
     def __getitem__(self, idx):
         if self.y is None:
-            return self.node[idx],self.edge[idx]
+            return self.node[idx],self.edge[idx],self.ind[idx]
         else:
-            return self.node[idx],self.edge[idx],self.y[idx]
+            return self.node[idx],self.edge[idx],self.ind[idx],self.y[idx]
         
 def collate_fn(batch):
-    if len(batch[0]) == 3:
-        node,edge,y = zip(*batch)
+    batch_len = len(batch[0])
+    if batch_len == 4:
+        node,edge,ind,y = zip(*batch)
     else:
-        node,edge = zip(*batch)
+        node,edge,ind = zip(*batch)
     out = torch.nn.utils.rnn.pad_sequence(node)
     mask = (out==0).all(2).T
-    edge = torch.stack(edge)[None,:,:]
-    y = torch.stack(y)
-    return out,mask,edge,y    
-
+    edge = torch.stack(edge)
+    
+    ind = torch.stack(ind)
+    t,n,_ = out.shape
+    m1 = torch.zeros((n,t))
+    m1[range(n),ind[:,0]] = 1
+    m1[range(n),ind[:,1]] = 1
+    m1 = m1.T[...,None]
+    
+    m2 = torch.zeros((n,29)) # 29 is max number of atoms
+    m2[range(n),ind[:,0]] = 1
+    m2[range(n),ind[:,1]] = 1
+    if batch_len == 4:
+        return torch.cat([out,m1],2),mask,torch.cat([edge,m2],1)[None,:,:],torch.stack(y) 
+    else:
+        return torch.cat([out,m1],2),mask,torch.cat([edge,m2],1)[None,:,:]
 
 '''------------------------------------------------------------------------------------------------------------------'''
 '''----------------------------------------------------- Model ------------------------------------------------------'''
