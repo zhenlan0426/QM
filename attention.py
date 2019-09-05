@@ -13,6 +13,7 @@ from torch import nn
 import torch.nn.functional as F
 from torch.nn import init
 from torch.nn.utils import clip_grad_value_
+from apex import amp
 #from torch.nn.init import xavier_uniform_
 
 import math
@@ -90,6 +91,52 @@ def collate_fn(batch):
         return torch.cat([out,m1],2),mask,torch.cat([edge,m2],1)[None,:,:],torch.stack(y) 
     else:
         return torch.cat([out,m1],2),mask,torch.cat([edge,m2],1)[None,:,:]
+
+def collate_fn2(batch):
+    # return ind for indexing later
+    batch_len = len(batch[0])
+    if batch_len == 4:
+        node,edge,ind,y = zip(*batch)
+    else:
+        node,edge,ind = zip(*batch)
+    out = torch.nn.utils.rnn.pad_sequence(node)
+    mask = (out==0).all(2).T
+    edge = torch.stack(edge)
+    
+    ind = torch.stack(ind)
+    t,n,_ = out.shape
+    m1 = torch.zeros((n,t))
+    m1[range(n),ind[:,0]] = 1
+    m1[range(n),ind[:,1]] = 1
+    m1 = m1.T[...,None]
+    
+    if batch_len == 4:
+        return torch.cat([out,m1],2),mask,edge[None,:,:-1],ind,torch.stack(y) 
+    else:
+        return torch.cat([out,m1],2),mask,edge[None,:,:-1],ind
+    
+def collate_fn3(batch):
+    # return ind[:,1],edge[None,:,:] for xyz
+    batch_len = len(batch[0])
+    if batch_len == 4:
+        node,edge,ind,y = zip(*batch)
+    else:
+        node,edge,ind = zip(*batch)
+    out = torch.nn.utils.rnn.pad_sequence(node)
+    mask = (out==0).all(2).T
+    edge = torch.stack(edge)
+    
+    ind = torch.stack(ind)
+    t,n,_ = out.shape
+    m1 = torch.zeros((n,t))
+    m1[range(n),ind[:,0]] = 1
+    m1[range(n),ind[:,1]] = 1
+    m1 = m1.T[...,None]
+    
+    if batch_len == 4:
+        return torch.cat([out,m1],2),mask,edge[None,:,:],ind[:,1],torch.stack(y) 
+    else:
+        return torch.cat([out,m1],2),mask,edge[None,:,:],ind[:,1]
 
 '''------------------------------------------------------------------------------------------------------------------'''
 '''----------------------------------------------------- Model ------------------------------------------------------'''
@@ -325,6 +372,48 @@ class Attention2(torch.nn.Module):
                 loss_perType[nonzeroIndex] = torch.log(loss_perType[nonzeroIndex])
                 return loss,loss_perType
 
+class Attention3(torch.nn.Module):
+    # no decoder. + indexing instead of max
+    def __init__(self,dim,encoder_layer,head_d,head,EncoderLayer,\
+                 node_d=8+1,edge_d=8,dropout=0.1,dim_feedforward=1024,catFactor=2):
+        super(Attention3, self).__init__()
+        self.lin_node = Linear(node_d+edge_d, dim)
+        self.norm_node = BatchNorm1d(node_d+edge_d)
+        self.encoder_layers = nn.ModuleList([EncoderLayer(dim,head_d,dim_feedforward=dim_feedforward,dropout=dropout) for _ in range(encoder_layer)])
+        self.head = head(dim*catFactor)
+
+    def forward(self, out,mask,edge,ind,y=None,logLoss=True):
+        edge_bc = torch.repeat_interleave(edge,out.shape[0],0)
+        n = out.shape[1]
+        out = torch.cat([out,edge_bc],2)
+        out = self.lin_node(self.norm_node(out.transpose(1,2)).transpose(1,2))
+
+        for f in self.encoder_layers:
+            out = f(out,src_key_padding_mask=mask)
+        
+        atom0 = out[ind[:,0],range(n)]
+        atom1 = out[ind[:,1],range(n)]
+        edge2 = torch.cat([atom0,atom1],1)
+        #edge2 = edge2.squeeze(0)
+        edge_attr3_old = edge.squeeze(0)[:,:8]
+        yhat = self.head(edge2,edge_attr3_old)
+        
+        if y is None:
+            return yhat
+        else:
+            k = torch.sum(edge_attr3_old,0)
+            nonzeroIndex = torch.nonzero(k).squeeze(1)
+            abs_ = torch.abs(y-yhat).unsqueeze(1)
+            loss_perType = torch.zeros(8,device='cuda:0')
+            if logLoss:
+                loss_perType[nonzeroIndex] = torch.log(torch.sum(abs_ * edge_attr3_old[:,nonzeroIndex],0)/k[nonzeroIndex])
+                loss = torch.sum(loss_perType)/nonzeroIndex.shape[0]
+                return loss,loss_perType         
+            else:
+                loss_perType[nonzeroIndex] = torch.sum(abs_ * edge_attr3_old[:,nonzeroIndex],0)/k[nonzeroIndex]
+                loss = torch.sum(loss_perType)/nonzeroIndex.shape[0]
+                loss_perType[nonzeroIndex] = torch.log(loss_perType[nonzeroIndex])
+                return loss,loss_perType
 
 '''------------------------------------------------------------------------------------------------------------------'''
 '''---------------------------------------------------- Utility -----------------------------------------------------'''
@@ -395,4 +484,75 @@ def train_type(opt,model,epochs,train_dl,val_dl,paras,clip,\
             
     time_elapsed = time.time() - since
     print('Training completed in {}s'.format(time_elapsed))
-    return model,bestOpt,bestWeight            
+    return model,bestOpt,bestWeight          
+
+
+def train_type2(opt,model,epochs,train_dl,val_dl,paras,clip,\
+               scheduler=None,logLoss=True,weight=None,patience=6,saveModelEpoch=50):
+    # add ind
+    since = time.time()
+    counter = 0 
+    lossBest = np.ones(8)*1e6
+    bestWeight = [None] * 8
+    bestOpt = [None] * 8
+        
+    opt.zero_grad()
+    for epoch in range(epochs):
+        # training #
+        model.train()
+        np.random.seed()
+        train_loss = 0
+        train_loss_perType = np.zeros(8)
+        val_loss = 0
+        val_loss_perType = np.zeros(8)
+        
+        for i,(out,mask,edge,ind,y) in enumerate(train_dl):
+            out,mask,edge,ind,y = out.to('cuda:0'),mask.to('cuda:0'),edge.to('cuda:0'),ind.to('cuda:0'),y.to('cuda:0')
+            loss,loss_perType = model(out,mask,edge,ind,y,logLoss)
+            with amp.scale_loss(loss, opt) as scaled_loss:
+                scaled_loss.backward()
+            #loss.backward()
+            clip_grad_value_(amp.master_params(opt),clip)
+            #clip_grad_value_(paras,clip)
+            opt.step()
+            opt.zero_grad()
+            train_loss += loss.item()
+            train_loss_perType += loss_perType.cpu().detach().numpy()
+            
+        # evaluating #
+        model.eval()
+        with torch.no_grad():
+            for j,(out,mask,edge,ind,y) in enumerate(val_dl):
+                out,mask,edge,ind,y = out.to('cuda:0'),mask.to('cuda:0'),edge.to('cuda:0'),ind.to('cuda:0'),y.to('cuda:0')
+                loss,loss_perType = model(out,mask,edge,ind,y,True)
+                val_loss += loss.item()
+                val_loss_perType += loss_perType.cpu().detach().numpy()
+        val_loss = val_loss/j
+        
+        # save model
+        val_loss_perType = val_loss_perType/j
+        for index_ in range(8):
+            if val_loss_perType[index_]<lossBest[index_]:
+                lossBest[index_] = val_loss_perType[index_]
+                if epoch>saveModelEpoch:
+                    bestWeight[index_] = copy.deepcopy(model.state_dict())
+                    bestOpt[index_] = copy.deepcopy(opt.state_dict())
+                    
+        print('epoch:{}, train_loss: {:+.3f}, val_loss: {:+.3f}, \ntrain_vector: {}, \nval_vector  : {}\n'.format(epoch,train_loss/i,val_loss,\
+                                                            '|'.join(['%+.2f'%i for i in train_loss_perType/i]),\
+                                                            '|'.join(['%+.2f'%i for i in val_loss_perType])))
+        if scheduler is not None:
+            scheduler.step(val_loss)
+                
+        # early stop
+        if np.any(val_loss_perType==lossBest):
+            counter = 0
+        else:
+            counter+= 1
+            if counter >= patience:
+                print('----early stop at epoch {}----'.format(epoch))
+                return model,bestOpt,bestWeight
+            
+    time_elapsed = time.time() - since
+    print('Training completed in {}s'.format(time_elapsed))
+    return model,bestOpt,bestWeight   
